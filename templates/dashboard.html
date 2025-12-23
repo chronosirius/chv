@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Instagram Analytics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors">
+    <div class="container mx-auto px-4 py-8">
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Instagram Analytics</h1>
+            <div class="flex gap-4">
+                <button onclick="toggleTheme()" class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                    <span id="theme-icon">🌙</span>
+                </button>
+                <button onclick="deleteAccount()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
+                    Delete Data
+                </button>
+                <a href="/logout" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">
+                    Logout
+                </a>
+            </div>
+        </div>
+
+        <div class="mb-6 flex gap-4 items-end">
+            <div class="flex-1">
+                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Select Conversation
+                </label>
+                <select 
+                    id="conversation-select"
+                    class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white"
+                >
+                    <option value="">Loading conversations...</option>
+                </select>
+            </div>
+            <button 
+                id="share-btn"
+                onclick="shareChat()"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled
+            >
+                Share Chat
+            </button>
+        </div>
+
+        <div id="content-area" class="space-y-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                <p class="text-gray-400 dark:text-gray-500 text-lg">Nothing selected.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentData = null;
+        let currentConversationId = null;
+        let customBoxes = [];
+
+        // Theme management
+        function toggleTheme() {
+            document.documentElement.classList.toggle('dark');
+            const isDark = document.documentElement.classList.contains('dark');
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            document.getElementById('theme-icon').textContent = isDark ? '☀️' : '🌙';
+        }
+
+        if (localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+            document.getElementById('theme-icon').textContent = '☀️';
+        }
+
+        // Utility functions
+        function formatDate(ms) {
+            return new Date(ms).toLocaleString();
+        }
+
+        function formatShortDate(ms) {
+            return new Date(ms).toLocaleDateString();
+        }
+
+        function formatDuration(ms) {
+            const days = Math.floor(ms / 86400000);
+            const hours = Math.floor((ms % 86400000) / 3600000);
+            const minutes = Math.floor((ms % 3600000) / 60000);
+            
+            if (days > 0) return `${days}d ${hours}h`;
+            if (hours > 0) return `${hours}h ${minutes}m`;
+            return `${minutes}m`;
+        }
+
+        // Delete account
+        async function deleteAccount() {
+            if (!confirm('Are you sure you want to delete all your data? This cannot be undone.')) {
+                return;
+            }
+            
+            const response = await fetch('/api/delete_account', { method: 'POST' });
+            if (response.ok) {
+                window.location.href = '/';
+            } else {
+                alert('Failed to delete data');
+            }
+        }
+
+        // Share chat
+        async function shareChat() {
+            const targetCode = prompt('Enter the access code to share this chat with:');
+            if (!targetCode) return;
+            
+            const response = await fetch('/api/share_chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_id: currentConversationId,
+                    target_code: targetCode
+                })
+            });
+            
+            const data = await response.json();
+            if (response.ok) {
+                alert(data.message || 'Chat shared successfully!');
+            } else {
+                alert('Error: ' + data.error);
+            }
+        }
+
+        // Load conversations
+        async function loadConversations() {
+            const response = await fetch('/api/conversations');
+            const conversations = await response.json();
+            
+            const select = document.getElementById('conversation-select');
+            select.innerHTML = '<option value="">Select a conversation...</option>';
+            
+            conversations.forEach(conv => {
+                const option = document.createElement('option');
+                option.value = conv.id;
+                option.textContent = conv.title;
+                select.appendChild(option);
+            });
+        }
+
+        // Load conversation data
+        async function loadConversation(conversationId) {
+            if (!conversationId) {
+                document.getElementById('content-area').innerHTML = `
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                        <p class="text-gray-400 dark:text-gray-500 text-lg">Nothing selected.</p>
+                    </div>
+                `;
+                document.getElementById('share-btn').disabled = true;
+                currentConversationId = null;
+                return;
+            }
+
+            currentConversationId = conversationId;
+            document.getElementById('share-btn').disabled = false;
+
+            const response = await fetch(`/api/conversation/${conversationId}`);
+            currentData = await response.json();
+            renderDashboard();
+        }
+
+        // Render dashboard
+        function renderDashboard() {
+            const conv = currentData.conversation;
+            
+            let headerHTML = `
+                <h2 class="text-2xl font-bold text-gray-900 dark:text-white">${conv.title}</h2>
+                <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                    ${conv.participants.map(p => `${p.name}`).join(', ')}
+                </p>
+            `;
+
+            const senderStatsHTML = Object.entries(currentData.messages_by_sender)
+                .map(([sender, count]) => {
+                    const attachments = currentData.attachments_by_sender[sender] || 0;
+                    return `
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">${sender}</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${count} <span class="text-gray-500 text-sm">(${attachments} attachments)</span></span>
+                        </div>
+                    `;
+                }).join('');
+
+            const contentArea = document.getElementById('content-area');
+            contentArea.innerHTML = `
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    ${headerHTML}
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Message Statistics</h3>
+                    <div class="space-y-2">
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">Total Messages</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${currentData.total_messages}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">Attachments (no text)</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${currentData.attachments}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">Overall Avg per Day</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${currentData.overall_avg_per_day.toFixed(1)}</span>
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600 my-3">
+                        ${senderStatsHTML}
+                    </div>
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Message Range</h3>
+                    <div class="space-y-3">
+                        <div>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Oldest Message</p>
+                            <p class="text-gray-900 dark:text-white">${formatDate(currentData.oldest.timestamp_ms)}</p>
+                            ${currentData.oldest.content ? `<p class="text-sm text-gray-600 dark:text-gray-400 mt-1 italic">"${currentData.oldest.content.substring(0, 100)}${currentData.oldest.content.length > 100 ? '...' : ''}"</p>` : ''}
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600">
+                        <div>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Latest Message</p>
+                            <p class="text-gray-900 dark:text-white">${formatDate(currentData.latest.timestamp_ms)}</p>
+                            ${currentData.latest.content ? `<p class="text-sm text-gray-600 dark:text-gray-400 mt-1 italic">"${currentData.latest.content.substring(0, 100)}${currentData.latest.content.length > 100 ? '...' : ''}"</p>` : ''}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Period Analysis</h3>
+                    <select 
+                        id="period-select"
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white mb-4"
+                        onchange="updatePeriodStats()"
+                    >
+                        <option value="past-1">Past Day</option>
+                        <option value="density-1">1-Day Highest Density</option>
+                        <option value="past-5">Past 5 Days</option>
+                        <option value="density-5">5-Day Highest Density</option>
+                        <option value="past-7">Past 7 Days</option>
+                        <option value="density-7">7-Day Highest Density</option>
+                        <option value="max-density">Max-Density Period (${currentData.max_density.days} days)</option>
+                        <option value="custom">Custom Period</option>
+                    </select>
+                    <div id="custom-period-inputs" class="mb-4 hidden">
+                        <div class="flex gap-2 items-center">
+                            <input type="date" id="custom-start" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
+                            <span class="text-gray-600 dark:text-gray-400">to</span>
+                            <input type="date" id="custom-end" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
+                            <button onclick="updatePeriodStats()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Go</button>
+                        </div>
+                    </div>
+                    <div id="period-stats"></div>
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Timing Analysis</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">Average Gap Between Messages</p>
+                            <p class="text-xl font-semibold text-gray-900 dark:text-white">${formatDuration(currentData.gaps.avg)}</p>
+                        </div>
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">Average Response Time</p>
+                            <p class="text-xl font-semibold text-gray-900 dark:text-white">${formatDuration(currentData.responses.avg)}</p>
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600">
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">Longest Gap: ${formatDuration(currentData.gaps.max.time)}</p>
+                            ${renderTimingMessage(currentData.gaps.max.msg1, currentData.gaps.max.msg2)}
+                        </div>
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">Shortest Gap: ${formatDuration(currentData.gaps.min.time)}</p>
+                            ${renderTimingMessage(currentData.gaps.min.msg1, currentData.gaps.min.msg2)}
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600">
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">Longest Response: ${formatDuration(currentData.responses.max.time)}</p>
+                            ${renderTimingMessage(currentData.responses.max.msg1, currentData.responses.max.msg2)}
+                        </div>
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">Shortest Response: ${formatDuration(currentData.responses.min.time)}</p>
+                            ${renderTimingMessage(currentData.responses.min.msg1, currentData.responses.min.msg2)}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Word Analysis</h3>
+                    <div id="word-analysis">
+                        ${currentData.total_messages < 15000 ? 
+                            '<button onclick="computeMostUsedWord(false)" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Compute Most Used Words</button>' :
+                            '<button onclick="computeMostUsedWord(true)" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg">Compute Most Used Words (Requires Passcode)</button>'
+                        }
+                    </div>
+                    <hr class="border-gray-300 dark:border-gray-600 my-6">
+                    <div id="emoji-analysis">
+                        ${currentData.total_messages < 15000 ? 
+                            '<button onclick="computeMostUsedEmoji(false)" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Compute Most Used Emojis</button>' :
+                            '<button onclick="computeMostUsedEmoji(true)" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg">Compute Most Used Emojis (Requires Passcode)</button>'
+                        }
+                    </div>
+                    <hr class="border-gray-300 dark:border-gray-600 my-6">
+                    <div id="count-specific-string" class="mt-6">
+                        <button onclick="promptCountSpecificString()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg">Count Specific String Occurrences</button>
+                    </div>
+                </div>
+
+                <div id="custom-boxes"></div>
+            `;
+
+            updatePeriodStats();
+            renderCustomBoxes();
+        }
+
+        function renderTimingMessage(msg1, msg2) {
+            if (!msg1 || !msg2) return '';
+            return `
+                <div class="text-xs space-y-1 ml-2">
+                    <div class="text-gray-500 dark:text-gray-500">
+                        ${formatDate(msg1.timestamp_ms)} - ${msg1.sender_name}
+                        ${msg1.content ? `<br><span class="italic">"${msg1.content.substring(0, 60)}${msg1.content.length > 60 ? '...' : ''}"</span>` : '<br>(attachment)'}
+                    </div>
+                    <div class="text-gray-500 dark:text-gray-500">
+                        ${formatDate(msg2.timestamp_ms)} - ${msg2.sender_name}
+                        ${msg2.content ? `<br><span class="italic">"${msg2.content.substring(0, 60)}${msg2.content.length > 60 ? '...' : ''}"</span>` : '<br>(attachment)'}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Compute most used word
+        async function computeMostUsedWord(requiresPasscode) {
+            let passcode = '';
+            if (requiresPasscode) {
+                passcode = prompt('Enter passcode to compute:');
+                if (!passcode) return;
+            }
+            
+            const container = document.getElementById('word-analysis');
+            container.innerHTML = '<p class="text-gray-600 dark:text-gray-400">Computing...</p>';
+            
+            const response = await fetch('/api/compute_word', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_id: currentConversationId,
+                    passcode: passcode
+                })
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.words && data.words.length > 0) {
+                    const wordsHTML = data.words.map(([word, count]) => 
+                        `<div class="flex justify-between"><span class="text-gray-700 dark:text-gray-300">${word}</span><span class="font-semibold text-gray-900 dark:text-white">${count}</span></div>`
+                    ).join('');
+                    container.innerHTML = `<div class="space-y-2">${wordsHTML}</div>`;
+                } else {
+                    container.innerHTML = '<p class="text-gray-600 dark:text-gray-400">No words found</p>';
+                }
+            } else {
+                const error = await response.json();
+                container.innerHTML = `<p class="text-red-600 dark:text-red-400">Error: ${error.error}</p>`;
+            }
+        }
+
+        // Compute most used word
+        async function computeMostUsedEmoji(requiresPasscode) {
+            let passcode = '';
+            if (requiresPasscode) {
+                passcode = prompt('Enter passcode to compute:');
+                if (!passcode) return;
+            }
+            
+            const container = document.getElementById('emoji-analysis');
+            container.innerHTML = '<p class="text-gray-600 dark:text-gray-400">Computing...</p>';
+            
+            const response = await fetch('/api/compute_emoji', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_id: currentConversationId,
+                    passcode: passcode
+                })
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                if (data.emojis && data.emojis.length > 0) {
+                    const wordsHTML = data.emojis.map(([emoji, count]) => 
+                        `<div class="flex justify-between"><span class="text-gray-700 dark:text-gray-300">${emoji}</span><span class="font-semibold text-gray-900 dark:text-white">${count}</span></div>`
+                    ).join('');
+                    container.innerHTML = `<div class="space-y-2">${wordsHTML}</div>`;
+                } else {
+                    container.innerHTML = '<p class="text-gray-600 dark:text-gray-400">No emojis found</p>';
+                }
+            } else {
+                const error = await response.json();
+                container.innerHTML = `<p class="text-red-600 dark:text-red-400">Error: ${error.error}</p>`;
+            }
+        }
+
+        async function promptCountSpecificString() {
+            const word = prompt('Enter the string to count occurrences of:');
+            if (!word) return;
+            const container = document.getElementById('count-specific-string');
+            container.innerHTML = '<p class="text-gray-600 dark:text-gray-400">Counting...</p>';
+            const response = await fetch('/api/count_specific_string', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    conversation_id: currentConversationId,
+                    string: word
+                })
+            });
+            if (response.ok) {
+                const data = await response.json();
+                container.innerHTML = `<p class="text-gray-700 dark:text-gray-300">The string "<strong>${data.string}</strong>" appears <strong>${data.count}</strong> times.</p><br>
+                    <button onclick="promptCountSpecificString()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg">Count Another String</button>
+                `;
+            } else {
+                const error = await response.json();
+                container.innerHTML = `<p class="text-red-600 dark:text-red-400">Error: ${error.error}</p>`;
+            }
+        }
+
+        // Update period statistics
+        function updatePeriodStats() {
+            const select = document.getElementById('period-select');
+            const value = select.value;
+            
+            // Show/hide custom inputs
+            const customInputs = document.getElementById('custom-period-inputs');
+            if (value === 'custom') {
+                customInputs.classList.remove('hidden');
+            } else {
+                customInputs.classList.add('hidden');
+            }
+            
+            let startMs, endMs, count, days, label;
+            const lastMessageTime = currentData.latest.timestamp_ms;
+            const MS_PER_DAY = 86400000;
+
+            if (value === 'custom') {
+                const startDate = document.getElementById('custom-start').value;
+                const endDate = document.getElementById('custom-end').value;
+                
+                if (!startDate || !endDate) return;
+                
+                startMs = new Date(startDate).getTime();
+                endMs = new Date(endDate).getTime() + 86399999; // End of day
+                days = Math.ceil((endMs - startMs) / MS_PER_DAY);
+                count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms <= endMs).length;
+                label = 'Custom Period';
+            } else if (value.startsWith('past-')) {
+                days = parseInt(value.split('-')[1]);
+                endMs = lastMessageTime;
+                startMs = lastMessageTime - (days * MS_PER_DAY);
+                count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms <= endMs).length;
+                label = `Past ${days} Day${days > 1 ? 's' : ''}`;
+            } else if (value.startsWith('density-')) {
+                days = parseInt(value.split('-')[1]);
+                [startMs, endMs] = findHighestDensityPeriod(currentData.messages, days);
+                count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms < endMs).length;
+                label = `${days}-Day Highest Density`;
+            } else if (value === 'max-density') {
+                startMs = currentData.max_density.start_ms;
+                endMs = currentData.max_density.end_ms;
+                count = currentData.max_density.count;
+                days = currentData.max_density.days;
+                label = `Max-Density Period`;
+            }
+
+            // Get messages in the period
+            const periodMessages = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms < endMs);
+            const firstMsg = periodMessages[0];
+            const lastMsg = periodMessages[periodMessages.length - 1];
+
+            let messagesHTML = '';
+            if (firstMsg && lastMsg) {
+                messagesHTML = `
+                    <hr class="border-gray-300 dark:border-gray-600 my-3">
+                    <div class="space-y-3">
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400">First Message</p>
+                            <p class="text-xs text-gray-500 dark:text-gray-500">${formatDate(firstMsg.timestamp_ms)} - ${firstMsg.sender_name}</p>
+                            ${firstMsg.content ? `<p class="text-sm text-gray-700 dark:text-gray-300 mt-1 italic">"${firstMsg.content.substring(0, 100)}${firstMsg.content.length > 100 ? '...' : ''}"</p>` : '<p class="text-sm text-gray-500 dark:text-gray-400 mt-1">(attachment)</p>'}
+                        </div>
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400">Last Message</p>
+                            <p class="text-xs text-gray-500 dark:text-gray-500">${formatDate(lastMsg.timestamp_ms)} - ${lastMsg.sender_name}</p>
+                            ${lastMsg.content ? `<p class="text-sm text-gray-700 dark:text-gray-300 mt-1 italic">"${lastMsg.content.substring(0, 100)}${lastMsg.content.length > 100 ? '...' : ''}"</p>` : '<p class="text-sm text-gray-500 dark:text-gray-400 mt-1">(attachment)</p>'}
+                        </div>
+                    </div>
+                `;
+            }
+
+            document.getElementById('period-stats').innerHTML = `
+                <div class="space-y-2">
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">Period</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${label}</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">Duration</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${days} day${days > 1 ? 's' : ''}</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">Date Range</span>
+                        <span class="font-semibold text-gray-900 dark:text-white text-right">${formatShortDate(startMs)} - ${formatShortDate(endMs)}</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">Messages</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${count}</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">Avg per Day</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${(count / days).toFixed(1)}</span>
+                    </div>
+                    ${messagesHTML}
+                </div>
+            `;
+        }
+
+        // Helper: Find highest density period
+        function findHighestDensityPeriod(data, windowDays) {
+            if (!data || data.length === 0) return [0, 0];
+            
+            const MS_PER_DAY = 86400000;
+            const windowMs = windowDays * MS_PER_DAY;
+            const timestamps = data.map(d => d.timestamp_ms).sort((a, b) => a - b);
+            const N = timestamps.length;
+            
+            let bestStartIndex = 0;
+            let maxCount = 0;
+            let start = 0;
+            let end = 0;
+            
+            while (start < N) {
+                const windowEndMs = timestamps[start] + windowMs;
+                while (end < N && timestamps[end] < windowEndMs) {
+                    end++;
+                }
+                const currentCount = end - start;
+                if (currentCount > maxCount) {
+                    maxCount = currentCount;
+                    bestStartIndex = start;
+                }
+                start++;
+            }
+            
+            const startMs = timestamps[bestStartIndex];
+            const endMs = startMs + windowMs;
+            return [startMs, endMs];
+        }
+
+        // Render custom boxes
+        function renderCustomBoxes() {
+            const container = document.getElementById('custom-boxes');
+            container.innerHTML = customBoxes.map(box => `
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">${box.title}</h3>
+                    <div id="${box.id}"></div>
+                </div>
+            `).join('');
+            
+            customBoxes.forEach(box => {
+                box.render(currentData);
+            });
+        }
+
+        // Public API for extensions
+        window.InstagramAnalytics = {
+            addCustomBox: function(title, id, renderFunction) {
+                customBoxes.push({ title, id, render: renderFunction });
+                if (currentData) {
+                    renderCustomBoxes();
+                }
+            },
+            getData: function() {
+                return currentData;
+            },
+            formatDate: formatDate,
+            formatShortDate: formatShortDate,
+            formatDuration: formatDuration
+        };
+
+        // Event listeners
+        document.getElementById('conversation-select').addEventListener('change', (e) => {
+            loadConversation(e.target.value);
+        });
+
+        // Initialize
+        loadConversations();
+    </script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instagram Analytics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors">
+    <div class="container mx-auto px-4 py-8 max-w-md">
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Instagram Analytics</h1>
+            <button onclick="toggleTheme()" class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                <span id="theme-icon">🌙</span>
+            </button>
+        </div>
+
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
+            <h2 class="text-xl font-semibold mb-4 text-gray-900 dark:text-white">Upload Data</h2>
+            <form id="upload-form" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Access Code
+                    </label>
+                    <input 
+                        type="text" 
+                        id="access-code" 
+                        required
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                        placeholder="Choose your access code"
+                    >
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Choose a unique code to access your data later</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Instagram Data (ZIP)
+                    </label>
+                    <input 
+                        type="file" 
+                        id="file" 
+                        accept=".zip"
+                        required
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-50 dark:file:bg-blue-900 file:text-blue-700 dark:file:text-blue-200 file:cursor-pointer"
+                    >
+                </div>
+                <button 
+                    type="submit"
+                    id="upload-btn"
+                    class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+                >
+                    Upload & Analyze
+                </button>
+            </form>
+            <div id="upload-status" class="mt-4 text-sm"></div>
+            <div id="progress-container" class="mt-4 hidden">
+                <div class="flex justify-between text-sm text-gray-600 dark:text-gray-400 mb-2">
+                    <span id="progress-text">Uploading...</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 overflow-hidden">
+                    <div id="progress-bar" class="bg-blue-600 h-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold mb-4 text-gray-900 dark:text-white">Have a Code?</h2>
+            <form id="login-form" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Access Code
+                    </label>
+                    <input 
+                        type="text" 
+                        id="code" 
+                        required
+                        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                        placeholder="Enter your code"
+                    >
+                </div>
+                <button 
+                    type="submit"
+                    class="w-full bg-gray-600 hover:bg-gray-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+                >
+                    Access Dashboard
+                </button>
+            </form>
+            <div id="login-status" class="mt-4 text-sm"></div>
+        </div>
+
+        <p class="text-center text-sm text-gray-600 dark:text-gray-400 mt-6">
+            Your data is stored for 3 days and automatically deleted after.
+        </p>
+    </div>
+
+    <script>
+        // Theme management
+        function toggleTheme() {
+            document.documentElement.classList.toggle('dark');
+            const isDark = document.documentElement.classList.contains('dark');
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            document.getElementById('theme-icon').textContent = isDark ? '☀️' : '🌙';
+        }
+
+        // Initialize theme
+        if (localStorage.getItem('theme') === 'dark' || (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+            document.getElementById('theme-icon').textContent = '☀️';
+        }
+
+        // Chunked upload
+        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+
+        async function uploadFileInChunks(file, accessCode) {
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            
+            // Initialize upload
+            const initResponse = await fetch('/upload/init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    access_code: accessCode,
+                    filename: file.name,
+                    total_chunks: totalChunks,
+                    file_size: file.size
+                })
+            });
+            
+            if (!initResponse.ok) {
+                const error = await initResponse.json();
+                throw new Error(error.error || 'Failed to initialize upload');
+            }
+            
+            const { upload_id } = await initResponse.json();
+            
+            // Show progress
+            const progressContainer = document.getElementById('progress-container');
+            const progressBar = document.getElementById('progress-bar');
+            const progressPercent = document.getElementById('progress-percent');
+            const progressText = document.getElementById('progress-text');
+            
+            progressContainer.classList.remove('hidden');
+            
+            // Upload chunks
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                
+                console.log(`Uploading chunk ${i}: start=${start}, end=${end}, size=${chunk.size}`);
+                
+                const formData = new FormData();
+                
+                const chunkResponse = await fetch(`/upload/chunk?upload_id=${upload_id}&chunk_number=${i}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/octet-stream'
+                    },
+                    body: chunk
+                });
+                
+                if (!chunkResponse.ok) {
+                    throw new Error('Failed to upload chunk ' + i);
+                }
+                
+                const chunkResult = await chunkResponse.json();
+                console.log(`Chunk ${i} uploaded: ${chunkResult.chunk_size} bytes`);
+                
+                // Update progress
+                const progress = ((i + 1) / totalChunks) * 100;
+                progressBar.style.width = progress + '%';
+                progressPercent.textContent = Math.round(progress) + '%';
+                progressText.textContent = `Uploading... (${i + 1}/${totalChunks} chunks)`;
+            }
+            
+            // Complete upload
+            progressText.textContent = 'Processing...';
+            const completeResponse = await fetch('/upload/complete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ upload_id: upload_id })
+            });
+            
+            if (!completeResponse.ok) {
+                const error = await completeResponse.json();
+                throw new Error(error.error || 'Failed to complete upload');
+            }
+            
+            return await completeResponse.json();
+        }
+
+        // Upload form
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const file = document.getElementById('file').files[0];
+            const accessCode = document.getElementById('access-code').value.trim();
+            const status = document.getElementById('upload-status');
+            const uploadBtn = document.getElementById('upload-btn');
+            
+            if (!file) {
+                status.innerHTML = '<span class="text-red-600 dark:text-red-400">Please select a file</span>';
+                return;
+            }
+            
+            if (!accessCode) {
+                status.innerHTML = '<span class="text-red-600 dark:text-red-400">Please enter an access code</span>';
+                return;
+            }
+            
+            uploadBtn.disabled = true;
+            uploadBtn.classList.add('opacity-50', 'cursor-not-allowed');
+            status.innerHTML = '';
+            
+            try {
+                const data = await uploadFileInChunks(file, accessCode);
+                
+                status.innerHTML = `<div class="p-3 bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200 rounded-lg">
+                    <p class="font-medium">Success! Your access code:</p>
+                    <p class="font-mono text-lg mt-1">${data.code}</p>
+                    <p class="text-sm mt-2">Use this code to access your data later.</p>
+                </div>`;
+                
+                setTimeout(() => window.location.href = '/dashboard', 2000);
+            } catch (error) {
+                status.innerHTML = `<span class="text-red-600 dark:text-red-400">Error: ${error.message}</span>`;
+                uploadBtn.disabled = false;
+                uploadBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                document.getElementById('progress-container').classList.add('hidden');
+            }
+        });
+
+        // Login form
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('code', document.getElementById('code').value);
+            
+            const status = document.getElementById('login-status');
+            status.innerHTML = '<span class="text-blue-600 dark:text-blue-400">Checking...</span>';
+            
+            try {
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    window.location.href = '/dashboard';
+                } else {
+                    status.innerHTML = `<span class="text-red-600 dark:text-red-400">Error: ${data.error}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span class="text-red-600 dark:text-red-400">Error: ${error.message}</span>`;
+            }
+        });
+    </script>
+</body>
+</html>

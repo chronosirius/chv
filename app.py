@@ -160,6 +160,11 @@ def index():
     cleanup_old_data()
     return render_template('index.html')
 
+@app.route('/help')
+def help_page():
+    return render_template('help.html')
+
+
 @app.route('/upload/init', methods=['POST'])
 def upload_init():
     """Initialize chunked upload"""

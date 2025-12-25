@@ -622,5 +622,31 @@
         // Initialize
         loadConversations();
     </script>
+    <script>
+        window.InstagramAnalytics.addCustomBox('Average Message Length', 'avg-message-length-box', function(data) {
+            const container = document.getElementById('avg-message-length-box');
+            if (!data) {
+                container.innerHTML = '<p class="text-gray-600 dark:text-gray-400">No data available.</p>';
+                return;
+            }
+            let html = `
+                <div class="space-y-2">
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">Overall Average Length</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${data.average_message_length.overall.toFixed(1)} characters</span>
+                    </div>
+            `;
+            for (const [sender, avgLength] of Object.entries(data.average_message_length.by_sender)) {
+                html += `
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">${sender}</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${avgLength.toFixed(1)} characters</span>
+                    </div>
+                `;
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        });
+    </script>
 </body>
 </html>

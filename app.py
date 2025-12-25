@@ -360,6 +360,12 @@ def api_conversation(conversation_id):
     if 'user_code' not in session:
         return jsonify({'error': 'Not authenticated'}), 401
     
+    # check if cached data exists
+    if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json')):
+        with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'r') as f:
+            cached_data = json.load(f)
+            return jsonify(cached_data)
+    
     messages = load_conversation_data(session['user_code'], conversation_id)
     
     # Get conversation info
@@ -449,8 +455,7 @@ def api_conversation(conversation_id):
         min_gap = {'time': 'Infinity', 'msg1': None, 'msg2': None}
     if min_response['time'] == float('inf'):
         min_response = {'time': 'Infinity', 'msg1': None, 'msg2': None}
-
-    return jsonify({
+    d = {
         'conversation': conv_info,
         'total_messages': total_messages,
         'messages_by_sender': messages_by_sender,
@@ -470,8 +475,15 @@ def api_conversation(conversation_id):
             'avg': avg_response,
             'max': max_response,
             'min': min_response
+        },
+        'average_message_length': {
+            "overall": sum(len(m.get('content', '')) for m in messages) / total_messages if total_messages > 0 else 0,
+            "by_sender": {sender: sum(len(m.get('content', '')) for m in messages if m.get('sender_name') == sender) / count for sender, count in messages_by_sender.items()}
         }
-    })
+    }
+    with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'w') as f:
+        json.dump(d, f)
+    return jsonify(d)
 
 @app.route('/api/compute_word', methods=['POST'])
 def compute_word():

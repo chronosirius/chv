@@ -10,10 +10,10 @@ import threading
 import time
 from glob import glob
 from pathlib import Path
-from werkzeug.utils import secure_filename
 from collections import Counter
 from dotenv import load_dotenv
 import emoji
+from density_finder_rs import find_highest_density_period # type: ignore 
 
 load_dotenv()
 
@@ -65,34 +65,34 @@ def cleanup_daemon():
 cleanup_thread = threading.Thread(target=cleanup_daemon, daemon=True)
 cleanup_thread.start()
 
-def find_highest_density_period(data, window_days=5):
-    """Find the period with highest message density"""
-    if not data:
-        return (0, 0)
+# def find_highest_density_period(data, window_days=5):
+#     """Find the period with highest message density"""
+#     if not data:
+#         return (0, 0)
     
-    MS_PER_DAY = 86_400_000
-    window_ms = window_days * MS_PER_DAY
-    timestamps = sorted([d['timestamp_ms'] for d in data])
-    N = len(timestamps)
+#     MS_PER_DAY = 86_400_000
+#     window_ms = window_days * MS_PER_DAY
+#     timestamps = sorted([d['timestamp_ms'] for d in data])
+#     N = len(timestamps)
     
-    best_start_index = 0
-    max_count = 0
-    start = 0
-    end = 0
+#     best_start_index = 0
+#     max_count = 0
+#     start = 0
+#     end = 0
     
-    while start < N:
-        window_end_ms = timestamps[start] + window_ms
-        while end < N and timestamps[end] < window_end_ms:
-            end += 1
-        current_count = end - start
-        if current_count > max_count:
-            max_count = current_count
-            best_start_index = start
-        start += 1
+#     while start < N:
+#         window_end_ms = timestamps[start] + window_ms
+#         while end < N and timestamps[end] < window_end_ms:
+#             end += 1
+#         current_count = end - start
+#         if current_count > max_count:
+#             max_count = current_count
+#             best_start_index = start
+#         start += 1
     
-    start_ms = timestamps[best_start_index]
-    end_ms = start_ms + window_ms
-    return (start_ms, end_ms)
+#     start_ms = timestamps[best_start_index]
+#     end_ms = start_ms + window_ms
+#     return (start_ms, end_ms)
 
 def nearest_day(ms: int): # find the nearest day timestamp from the ms timestamp
     MS_PER_DAY = 86_400_000
@@ -206,7 +206,7 @@ def upload_init():
 def upload_chunk():
     """Upload a single chunk"""
     upload_id = request.args.get('upload_id')
-    chunk_number = int(request.args.get('chunk_number'))
+    chunk_number = request.args.get('chunk_number', type=int)
     #chunk_file = request.files.get('chunk')
     
     if not upload_id:
@@ -406,7 +406,7 @@ def api_conversation(conversation_id):
     # Calculate max density period
     maxed_density = {'start_ms': 0, 'end_ms': 0, 'count': 0, 'days': 1}
     for days in range(1, 31):
-        start_ms, end_ms = find_highest_density_period(messages, window_days=days)
+        start_ms, end_ms = find_highest_density_period(messages, days)
         count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms)
         if count / days > maxed_density['count'] / maxed_density['days']:
             maxed_density = {
@@ -439,7 +439,7 @@ def api_conversation(conversation_id):
     min_response = {'time': float('inf'), 'msg1': None, 'msg2': None}
     total_responses = 0
     response_count = 0
-    prev_response = messages[0] if messages else None
+    prev_response = messages[0]
     
     for i in range(1, len(messages)):
         if messages[i]['sender_name'] != prev_response['sender_name']:

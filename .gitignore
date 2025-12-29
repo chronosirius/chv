@@ -5,3 +5,8 @@ __pycache__/
 temp_chunks/
 user_data/
 uploads/
+
+
+# Added by cargo
+
+/target

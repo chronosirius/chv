@@ -17,11 +17,11 @@
         </div>
 
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
-            <h2 class="text-xl font-semibold mb-4 text-gray-900 dark:text-white">Upload Data <a class="text-blue-300 text-sm" href="/help">(help)</a></h2>
+            <h2 class="text-xl font-semibold mb-4 text-gray-900 dark:text-white">Upload Data <a class="text-blue-300 text-sm underline" href="/help" target="_blank">(help)</a></h2>
             <form id="upload-form" class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Access Code
+                        Access Code <span class="text-xs text-gray-500 dark:text-gray-400">(4-20 letters, numbers, or underscores)</span>
                     </label>
                     <input 
                         type="text" 
@@ -29,6 +29,8 @@
                         required
                         class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
                         placeholder="Choose your access code"
+                        pattern="[a-zA-Z0-9_]{4,20}"
+                        onkeydown="return /[a-zA-Z0-9_]/i.test(event.key)"
                     >
                     <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Choose a unique code to access your data later. Bear in mind, anyone can access your data if they have this code.</p>
                 </div>
@@ -69,7 +71,7 @@
             <form id="login-form" class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                        Access Code
+                        Access Code <span class="text-xs text-gray-500 dark:text-gray-400">(4-20 letters, numbers, or underscores)</span>
                     </label>
                     <input 
                         type="text" 
@@ -77,6 +79,8 @@
                         required
                         class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
                         placeholder="Enter your code"
+                        pattern="[a-zA-Z0-9_]{4,20}"
+                        onkeydown="return /[a-zA-Z0-9_]/i.test(event.key)"
                     >
                 </div>
                 <button 
@@ -110,7 +114,7 @@
         }
 
         // Chunked upload
-        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+        const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks
 
         async function uploadFileInChunks(file, accessCode) {
             const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
@@ -195,9 +199,10 @@
             e.preventDefault();
             
             const file = document.getElementById('file').files[0];
-            const accessCode = document.getElementById('access-code').value.trim();
+            const accessCodeE = document.getElementById('access-code');
             const status = document.getElementById('upload-status');
             const uploadBtn = document.getElementById('upload-btn');
+            const accessCode = accessCodeE.value.trim();
             
             if (!file) {
                 status.innerHTML = '<span class="text-red-600 dark:text-red-400">Please select a file</span>';
@@ -210,6 +215,7 @@
             }
             
             uploadBtn.disabled = true;
+
             uploadBtn.classList.add('opacity-50', 'cursor-not-allowed');
             status.innerHTML = '';
             

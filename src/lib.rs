@@ -53,9 +53,8 @@ fn find_highest_density_period(data: &Bound<'_, PyList>, period: u8) -> (u64, u6
 
     let start_ms = timestamps[best_start_index];
     // Ensure end_ms doesn't exceed the last timestamp
-    let calculated_end_ms = start_ms + window_ms;
-    let last_timestamp = timestamps[n - 1];
-    let end_ms = if calculated_end_ms > last_timestamp { last_timestamp } else { calculated_end_ms };
+    // this is actually guaranteed if we extract the end_ms from the timestamps array
+    let end_ms = timestamps[best_end_index - 1];
 
     return (start_ms, end_ms);
 }

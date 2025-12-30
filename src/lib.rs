@@ -52,7 +52,10 @@ fn find_highest_density_period(data: &Bound<'_, PyList>, period: u8) -> (u64, u6
     }
 
     let start_ms = timestamps[best_start_index];
-    let end_ms = timestamps[best_end_index - 1] + 1;
+    // Ensure end_ms doesn't exceed the last timestamp
+    let calculated_end_ms = start_ms + window_ms;
+    let last_timestamp = timestamps[n - 1];
+    let end_ms = if calculated_end_ms > last_timestamp { last_timestamp } else { calculated_end_ms };
 
     return (start_ms, end_ms);
 }
@@ -102,13 +105,16 @@ fn find_participant_density_period(data: &Bound<'_, PyList>, period: u8, partici
     all_timestamps.sort_unstable();
     participant_timestamps.sort_unstable();
 
+    let last_timestamp = all_timestamps[all_timestamps.len() - 1];
     let mut best_start_ms: u64 = all_timestamps[0];
-    let mut best_end_ms: u64 = all_timestamps[0] + window_ms;
+    let mut best_end_ms: u64 = std::cmp::min(all_timestamps[0] + window_ms, last_timestamp);
     let mut best_count: usize = if find_max { 0 } else { usize::MAX };
 
     // Slide window across all timestamps
     for start_ts in &all_timestamps {
-        let end_ts = start_ts + window_ms;
+        let calculated_end_ts = start_ts + window_ms;
+        // Ensure end_ts doesn't exceed the last timestamp
+        let end_ts = std::cmp::min(calculated_end_ts, last_timestamp);
         
         // Count participant messages in this window
         let count = participant_timestamps.iter()

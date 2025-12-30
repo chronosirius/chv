@@ -532,11 +532,14 @@
                 if (!participant) return;
                 
                 const findMax = value === 'max-by-participant';
-                [startMs, endMs] = findParticipantDensityPeriod(currentData.messages, days, participant, findMax);
-                count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms < endMs).length;
-                const participantCount = currentData.messages.filter(m => 
-                    m.timestamp_ms >= startMs && m.timestamp_ms < endMs && m.sender_name === participant
-                ).length;
+                const periodType = findMax ? 'max' : 'min';
+                
+                // Use pre-calculated data from server
+                const periodData = currentData.participant_periods[participant][periodType][days];
+                startMs = periodData.start_ms;
+                endMs = periodData.end_ms;
+                count = periodData.total_count;
+                const participantCount = periodData.participant_count;
                 label = `${findMax ? 'Max' : 'Min'} by ${participant} (${participantCount} messages)`;
             } else if (value.startsWith('past-')) {
                 days = parseInt(value.split('-')[1]);
@@ -638,43 +641,6 @@
             const startMs = timestamps[bestStartIndex];
             const endMs = startMs + windowMs;
             return [startMs, endMs];
-        }
-
-        // Helper: Find highest or lowest density period for a specific participant
-        function findParticipantDensityPeriod(data, windowDays, participant, findMax) {
-            if (!data || data.length === 0) return [0, 0];
-            
-            const MS_PER_DAY = 86400000;
-            const windowMs = windowDays * MS_PER_DAY;
-            
-            // Get all timestamps and participant-specific timestamps
-            const allTimestamps = data.map(d => d.timestamp_ms).sort((a, b) => a - b);
-            const participantTimestamps = data
-                .filter(d => d.sender_name === participant)
-                .map(d => d.timestamp_ms)
-                .sort((a, b) => a - b);
-            
-            if (allTimestamps.length === 0) return [0, 0];
-            
-            let bestStartMs = allTimestamps[0];
-            let bestEndMs = allTimestamps[0] + windowMs;
-            let bestCount = findMax ? 0 : Number.MAX_SAFE_INTEGER;
-            
-            // Slide window across all timestamps
-            for (const startTs of allTimestamps) {
-                const endTs = startTs + windowMs;
-                
-                // Count participant messages in this window
-                const count = participantTimestamps.filter(ts => ts >= startTs && ts < endTs).length;
-                
-                if ((findMax && count > bestCount) || (!findMax && count < bestCount)) {
-                    bestCount = count;
-                    bestStartMs = startTs;
-                    bestEndMs = endTs;
-                }
-            }
-            
-            return [bestStartMs, bestEndMs];
         }
 
         // Render custom boxes

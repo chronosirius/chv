@@ -416,6 +416,36 @@ def api_conversation(conversation_id):
                 'days': days
             }
     
+    # Calculate participant-specific periods for all participants and day ranges (1-30)
+    participant_periods = {}
+    for sender in messages_by_sender.keys():
+        participant_periods[sender] = {
+            'max': {},
+            'min': {}
+        }
+        for days in range(1, 31):
+            # Calculate max period for this participant
+            start_ms, end_ms = find_participant_density_period(messages, days, sender, True)
+            total_count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms)
+            participant_count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms and m.get('sender_name') == sender)
+            participant_periods[sender]['max'][days] = {
+                'start_ms': start_ms,
+                'end_ms': end_ms,
+                'total_count': total_count,
+                'participant_count': participant_count
+            }
+            
+            # Calculate min period for this participant
+            start_ms, end_ms = find_participant_density_period(messages, days, sender, False)
+            total_count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms)
+            participant_count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms and m.get('sender_name') == sender)
+            participant_periods[sender]['min'][days] = {
+                'start_ms': start_ms,
+                'end_ms': end_ms,
+                'total_count': total_count,
+                'participant_count': participant_count
+            }
+    
     # Calculate gap and response times
     max_gap = {'time': 0, 'msg1': None, 'msg2': None}
     min_gap = {'time': float('inf'), 'msg1': None, 'msg2': None}
@@ -470,6 +500,7 @@ def api_conversation(conversation_id):
         'latest': latest,
         'messages': messages,
         'max_density': maxed_density,
+        'participant_periods': participant_periods,
         'overall_avg_per_day': overall_avg_per_day,
         'gaps': {
             'avg': avg_gap,

@@ -269,17 +269,23 @@
                         <option value="past-7">Past 7 Days</option>
                         <option value="density-7">7-Day Highest Density</option>
                         <option value="max-density">Max-Density Period (${currentData.max_density.days} days)</option>
+                        <option value="custom-density">Custom Density Period</option>
                         <option value="max-by-participant">Max by Participant</option>
                         <option value="min-by-participant">Min by Participant</option>
                         <option value="custom">Custom Period</option>
                     </select>
+                    <div id="custom-density-inputs" class="mb-4 hidden">
+                        <div class="flex gap-2 items-center">
+                            <input type="number" id="custom-density-days" min="1" placeholder="Number of days" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
+                            <button onclick="updatePeriodStats()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Go</button>
+                        </div>
+                    </div>
                     <div id="participant-period-inputs" class="mb-4 hidden">
                         <div class="flex gap-2 items-center">
                             <select id="participant-select" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
                                 <option value="">Select participant...</option>
                             </select>
-                            <select id="participant-days" class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
-                            </select>
+                            <input type="number" id="participant-days" min="1" placeholder="Number of days" class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
                             <button onclick="updatePeriodStats()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Go</button>
                         </div>
                     </div>
@@ -360,18 +366,6 @@
                     option.textContent = sender;
                     participantSelect.appendChild(option);
                 });
-            }
-
-            // Populate days select dropdown (1-30 days)
-            const daysSelect = document.getElementById('participant-days');
-            if (daysSelect) {
-                daysSelect.innerHTML = '';
-                for (let i = 1; i <= 30; i++) {
-                    const option = document.createElement('option');
-                    option.value = i;
-                    option.textContent = `${i} day${i > 1 ? 's' : ''}`;
-                    daysSelect.appendChild(option);
-                }
             }
 
             updatePeriodStats();
@@ -491,23 +485,25 @@
         }
 
         // Update period statistics
-        function updatePeriodStats() {
+        async function updatePeriodStats() {
             const select = document.getElementById('period-select');
             const value = select.value;
             
-            // Show/hide custom inputs
+            // Show/hide input sections
             const customInputs = document.getElementById('custom-period-inputs');
             const participantInputs = document.getElementById('participant-period-inputs');
+            const customDensityInputs = document.getElementById('custom-density-inputs');
+            
+            customInputs.classList.add('hidden');
+            participantInputs.classList.add('hidden');
+            customDensityInputs.classList.add('hidden');
             
             if (value === 'custom') {
                 customInputs.classList.remove('hidden');
-                participantInputs.classList.add('hidden');
             } else if (value === 'max-by-participant' || value === 'min-by-participant') {
-                customInputs.classList.add('hidden');
                 participantInputs.classList.remove('hidden');
-            } else {
-                customInputs.classList.add('hidden');
-                participantInputs.classList.add('hidden');
+            } else if (value === 'custom-density') {
+                customDensityInputs.classList.remove('hidden');
             }
             
             let startMs, endMs, count, days, label;
@@ -525,21 +521,67 @@
                 days = Math.ceil((endMs - startMs) / MS_PER_DAY);
                 count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms <= endMs).length;
                 label = 'Custom Period';
+            } else if (value === 'custom-density') {
+                days = parseInt(document.getElementById('custom-density-days').value);
+                
+                if (!days || days < 1) return;
+                
+                // Show loading indicator
+                document.getElementById('period-stats').innerHTML = '<p class="text-gray-600 dark:text-gray-400">Calculating...</p>';
+                
+                // Call server API for calculation
+                const response = await fetch('/api/custom_density', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        conversation_id: currentConversationId,
+                        days: days
+                    })
+                });
+                
+                if (!response.ok) {
+                    document.getElementById('period-stats').innerHTML = '<p class="text-red-600 dark:text-red-400">Error calculating period</p>';
+                    return;
+                }
+                
+                const result = await response.json();
+                startMs = result.start_ms;
+                endMs = result.end_ms;
+                count = result.count;
+                label = `${days}-Day Highest Density`;
             } else if (value === 'max-by-participant' || value === 'min-by-participant') {
                 const participant = document.getElementById('participant-select').value;
-                days = parseInt(document.getElementById('participant-days').value) || 1;
+                days = parseInt(document.getElementById('participant-days').value);
                 
-                if (!participant) return;
+                if (!participant || !days || days < 1) return;
+                
+                // Show loading indicator
+                document.getElementById('period-stats').innerHTML = '<p class="text-gray-600 dark:text-gray-400">Calculating...</p>';
                 
                 const findMax = value === 'max-by-participant';
-                const periodType = findMax ? 'max' : 'min';
                 
-                // Use pre-calculated data from server
-                const periodData = currentData.participant_periods[participant][periodType][days];
-                startMs = periodData.start_ms;
-                endMs = periodData.end_ms;
-                count = periodData.total_count;
-                const participantCount = periodData.participant_count;
+                // Call server API for calculation
+                const response = await fetch('/api/participant_period', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        conversation_id: currentConversationId,
+                        participant: participant,
+                        days: days,
+                        find_max: findMax
+                    })
+                });
+                
+                if (!response.ok) {
+                    document.getElementById('period-stats').innerHTML = '<p class="text-red-600 dark:text-red-400">Error calculating period</p>';
+                    return;
+                }
+                
+                const result = await response.json();
+                startMs = result.start_ms;
+                endMs = result.end_ms;
+                count = result.total_count;
+                const participantCount = result.participant_count;
                 label = `${findMax ? 'Max' : 'Min'} by ${participant} (${participantCount} messages)`;
             } else if (value.startsWith('past-')) {
                 days = parseInt(value.split('-')[1]);

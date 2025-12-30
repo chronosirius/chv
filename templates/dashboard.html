@@ -524,7 +524,7 @@
             } else if (value === 'custom-density') {
                 days = parseInt(document.getElementById('custom-density-days').value);
                 
-                if (!days || days < 1) return;
+                if (isNaN(days) || !days || days < 1) return;
                 
                 // Show loading indicator
                 document.getElementById('period-stats').innerHTML = '<p class="text-gray-600 dark:text-gray-400">Calculating...</p>';
@@ -553,7 +553,7 @@
                 const participant = document.getElementById('participant-select').value;
                 days = parseInt(document.getElementById('participant-days').value);
                 
-                if (!participant || !days || days < 1) return;
+                if (!participant || isNaN(days) || !days || days < 1) return;
                 
                 // Show loading indicator
                 document.getElementById('period-stats').innerHTML = '<p class="text-gray-600 dark:text-gray-400">Calculating...</p>';

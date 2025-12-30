@@ -503,7 +503,12 @@ def participant_period():
     if not conversation_id or not participant:
         return jsonify({'error': 'Missing required parameters'}), 400
     
-    if not isinstance(days, int) or days < 1:
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Days must be a valid integer'}), 400
+    
+    if days < 1:
         return jsonify({'error': 'Days must be a positive integer'}), 400
     
     messages = load_conversation_data(session['user_code'], conversation_id)
@@ -535,7 +540,12 @@ def custom_density():
     if not conversation_id:
         return jsonify({'error': 'Missing conversation_id'}), 400
     
-    if not isinstance(days, int) or days < 1:
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Days must be a valid integer'}), 400
+    
+    if days < 1:
         return jsonify({'error': 'Days must be a positive integer'}), 400
     
     messages = load_conversation_data(session['user_code'], conversation_id)

@@ -13,7 +13,7 @@ from pathlib import Path
 from collections import Counter
 from dotenv import load_dotenv
 import emoji
-from density_finder_rs import find_highest_density_period # type: ignore 
+from density_finder_rs import find_highest_density_period, find_participant_density_period # type: ignore 
 
 load_dotenv()
 

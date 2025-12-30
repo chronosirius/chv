@@ -269,8 +269,20 @@
                         <option value="past-7">Past 7 Days</option>
                         <option value="density-7">7-Day Highest Density</option>
                         <option value="max-density">Max-Density Period (${currentData.max_density.days} days)</option>
+                        <option value="max-by-participant">Max by Participant</option>
+                        <option value="min-by-participant">Min by Participant</option>
                         <option value="custom">Custom Period</option>
                     </select>
+                    <div id="participant-period-inputs" class="mb-4 hidden">
+                        <div class="flex gap-2 items-center">
+                            <select id="participant-select" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
+                                <option value="">Select participant...</option>
+                            </select>
+                            <select id="participant-days" class="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
+                            </select>
+                            <button onclick="updatePeriodStats()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Go</button>
+                        </div>
+                    </div>
                     <div id="custom-period-inputs" class="mb-4 hidden">
                         <div class="flex gap-2 items-center">
                             <input type="date" id="custom-start" class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white">
@@ -337,6 +349,30 @@
 
                 <div id="custom-boxes"></div>
             `;
+
+            // Populate participant select dropdown
+            const participantSelect = document.getElementById('participant-select');
+            if (participantSelect) {
+                participantSelect.innerHTML = '<option value="">Select participant...</option>';
+                Object.keys(currentData.messages_by_sender).forEach(sender => {
+                    const option = document.createElement('option');
+                    option.value = sender;
+                    option.textContent = sender;
+                    participantSelect.appendChild(option);
+                });
+            }
+
+            // Populate days select dropdown (1-30 days)
+            const daysSelect = document.getElementById('participant-days');
+            if (daysSelect) {
+                daysSelect.innerHTML = '';
+                for (let i = 1; i <= 30; i++) {
+                    const option = document.createElement('option');
+                    option.value = i;
+                    option.textContent = `${i} day${i > 1 ? 's' : ''}`;
+                    daysSelect.appendChild(option);
+                }
+            }
 
             updatePeriodStats();
             renderCustomBoxes();
@@ -461,10 +497,17 @@
             
             // Show/hide custom inputs
             const customInputs = document.getElementById('custom-period-inputs');
+            const participantInputs = document.getElementById('participant-period-inputs');
+            
             if (value === 'custom') {
                 customInputs.classList.remove('hidden');
+                participantInputs.classList.add('hidden');
+            } else if (value === 'max-by-participant' || value === 'min-by-participant') {
+                customInputs.classList.add('hidden');
+                participantInputs.classList.remove('hidden');
             } else {
                 customInputs.classList.add('hidden');
+                participantInputs.classList.add('hidden');
             }
             
             let startMs, endMs, count, days, label;
@@ -482,6 +525,19 @@
                 days = Math.ceil((endMs - startMs) / MS_PER_DAY);
                 count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms <= endMs).length;
                 label = 'Custom Period';
+            } else if (value === 'max-by-participant' || value === 'min-by-participant') {
+                const participant = document.getElementById('participant-select').value;
+                days = parseInt(document.getElementById('participant-days').value) || 1;
+                
+                if (!participant) return;
+                
+                const findMax = value === 'max-by-participant';
+                [startMs, endMs] = findParticipantDensityPeriod(currentData.messages, days, participant, findMax);
+                count = currentData.messages.filter(m => m.timestamp_ms >= startMs && m.timestamp_ms < endMs).length;
+                const participantCount = currentData.messages.filter(m => 
+                    m.timestamp_ms >= startMs && m.timestamp_ms < endMs && m.sender_name === participant
+                ).length;
+                label = `${findMax ? 'Max' : 'Min'} by ${participant} (${participantCount} messages)`;
             } else if (value.startsWith('past-')) {
                 days = parseInt(value.split('-')[1]);
                 endMs = lastMessageTime;
@@ -582,6 +638,43 @@
             const startMs = timestamps[bestStartIndex];
             const endMs = startMs + windowMs;
             return [startMs, endMs];
+        }
+
+        // Helper: Find highest or lowest density period for a specific participant
+        function findParticipantDensityPeriod(data, windowDays, participant, findMax) {
+            if (!data || data.length === 0) return [0, 0];
+            
+            const MS_PER_DAY = 86400000;
+            const windowMs = windowDays * MS_PER_DAY;
+            
+            // Get all timestamps and participant-specific timestamps
+            const allTimestamps = data.map(d => d.timestamp_ms).sort((a, b) => a - b);
+            const participantTimestamps = data
+                .filter(d => d.sender_name === participant)
+                .map(d => d.timestamp_ms)
+                .sort((a, b) => a - b);
+            
+            if (allTimestamps.length === 0) return [0, 0];
+            
+            let bestStartMs = allTimestamps[0];
+            let bestEndMs = allTimestamps[0] + windowMs;
+            let bestCount = findMax ? 0 : Number.MAX_SAFE_INTEGER;
+            
+            // Slide window across all timestamps
+            for (const startTs of allTimestamps) {
+                const endTs = startTs + windowMs;
+                
+                // Count participant messages in this window
+                const count = participantTimestamps.filter(ts => ts >= startTs && ts < endTs).length;
+                
+                if ((findMax && count > bestCount) || (!findMax && count < bestCount)) {
+                    bestCount = count;
+                    bestStartMs = startTs;
+                    bestEndMs = endTs;
+                }
+            }
+            
+            return [bestStartMs, bestEndMs];
         }
 
         // Render custom boxes

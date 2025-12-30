@@ -86,7 +86,7 @@ fn find_participant_density_period(data: &Bound<'_, PyList>, period: u8, partici
     
     for item in data.iter() {
         let dict = item.cast::<pyo3::types::PyDict>().unwrap();
-        let ts: u64 = dict.get_item("timestamp_ms").unwrap().unwrap().extract().unwrap();
+        let ts: u64 = dict.get_item("timestamp_ms").unwrap().unwrap().cast::<pyo3::types::PyInt>().unwrap().extract().unwrap();
         all_timestamps.push(ts);
         
         let sender: String = dict.get_item("sender_name").unwrap().unwrap().extract().unwrap();

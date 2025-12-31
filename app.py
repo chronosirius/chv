@@ -13,7 +13,7 @@ from pathlib import Path
 from collections import Counter
 from dotenv import load_dotenv
 import emoji
-from density_finder_rs import find_highest_density_period # type: ignore 
+from density_finder_rs import find_highest_density_period, find_participant_density_period # type: ignore 
 
 load_dotenv()
 
@@ -489,6 +489,77 @@ def api_conversation(conversation_id):
     with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'w') as f:
         json.dump(d, f)
     return jsonify(d)
+
+@app.route('/api/participant_period', methods=['POST'])
+def participant_period():
+    if 'user_code' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    conversation_id = request.json.get('conversation_id')
+    participant = request.json.get('participant')
+    days = request.json.get('days', 1)
+    find_max = request.json.get('find_max', True)
+    
+    if not conversation_id or not participant:
+        return jsonify({'error': 'Missing required parameters'}), 400
+    
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Days must be a valid integer'}), 400
+    
+    if days < 1:
+        return jsonify({'error': 'Days must be a positive integer'}), 400
+    
+    messages = load_conversation_data(session['user_code'], conversation_id)
+    
+    # Use Rust implementation for efficient calculation
+    start_ms, end_ms = find_participant_density_period(messages, days, participant, find_max)
+    
+    # Count messages in the period
+    total_count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms)
+    participant_count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms and m.get('sender_name') == participant)
+    
+    return jsonify({
+        'start_ms': start_ms,
+        'end_ms': end_ms,
+        'total_count': total_count,
+        'participant_count': participant_count,
+        'days': days,
+        'participant': participant
+    })
+
+@app.route('/api/custom_density', methods=['POST'])
+def custom_density():
+    if 'user_code' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    conversation_id = request.json.get('conversation_id')
+    days = request.json.get('days', 1)
+    
+    if not conversation_id:
+        return jsonify({'error': 'Missing conversation_id'}), 400
+    
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Days must be a valid integer'}), 400
+    
+    if days < 1:
+        return jsonify({'error': 'Days must be a positive integer'}), 400
+    
+    messages = load_conversation_data(session['user_code'], conversation_id)
+    
+    # Use Rust implementation for efficient calculation
+    start_ms, end_ms = find_highest_density_period(messages, days)
+    count = sum(1 for m in messages if start_ms <= m['timestamp_ms'] < end_ms)
+    
+    return jsonify({
+        'start_ms': start_ms,
+        'end_ms': end_ms,
+        'count': count,
+        'days': days
+    })
 
 @app.route('/api/compute_word', methods=['POST'])
 def compute_word():

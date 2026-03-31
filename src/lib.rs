@@ -289,9 +289,232 @@ fn find_participant_density_period(data: &Bound<'_, PyList>, period: u8, partici
     }
 }
 
+
+#[pyfunction]
+fn detect_conversations(py: Python, data: &Bound<'_, pyo3::types::PyList>) -> PyResult<PyObject> {
+    use std::collections::HashMap;
+    let mut messages: Vec<Message> = Vec::with_capacity(data.len());
+    for item in data.iter() {
+        if let Ok(dict) = item.downcast::<pyo3::types::PyDict>() {
+            if let Ok(Some(ts_obj)) = dict.get_item("timestamp_ms") {
+                if let Ok(ts_int) = ts_obj.downcast::<pyo3::types::PyInt>() {
+                    if let Ok(ts) = ts_int.extract::<u64>() {
+                        if let Ok(Some(s_obj)) = dict.get_item("sender_name") {
+                            if let Ok(sender) = s_obj.extract::<String>() {
+                                messages.push(Message { timestamp_ms: ts, sender_name: sender });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    messages.sort_by_key(|m| m.timestamp_ms);
+
+    let n = messages.len();
+    if n == 0 {
+        let out = pyo3::types::PyDict::new(py);
+        out.set_item("conversations", pyo3::types::PyList::empty(py)).unwrap();
+        out.set_item("thread_aggregation", pyo3::types::PyDict::new(py)).unwrap();
+        return Ok(out.into());
+    }
+
+    let mut same_sender_iats = Vec::new();
+    let mut diff_sender_iats = Vec::new();
+
+    for i in 1..n {
+        let prev = &messages[i - 1];
+        let curr = &messages[i];
+        let gap = curr.timestamp_ms.saturating_sub(prev.timestamp_ms);
+        if prev.sender_name == curr.sender_name {
+            same_sender_iats.push(gap);
+        } else {
+            diff_sender_iats.push(gap);
+        }
+    }
+
+    let median_same = if same_sender_iats.is_empty() {
+        300_000 // 5 mins
+    } else {
+        same_sender_iats.sort_unstable();
+        same_sender_iats[same_sender_iats.len() / 2]
+    };
+
+    let median_diff = if diff_sender_iats.is_empty() {
+        1_200_000 // 20 mins
+    } else {
+        diff_sender_iats.sort_unstable();
+        diff_sender_iats[diff_sender_iats.len() / 2]
+    };
+
+    let mut threshold_same = (median_same as f64 * 1.5) as u64;
+    let mut threshold_diff = (median_diff as f64 * 3.0) as u64;
+
+    threshold_same = std::cmp::max(threshold_same, 60_000);
+    threshold_diff = std::cmp::max(threshold_diff, 120_000);
+
+    struct ConvoData {
+        id: u64,
+        start_ms: u64,
+        end_ms: u64,
+        message_count: usize,
+        leans: HashMap<String, usize>,
+        responses: Vec<u64>,
+    }
+
+    let mut conversations: Vec<ConvoData> = Vec::new();
+    let mut current_convo = ConvoData {
+        id: 0,
+        start_ms: messages[0].timestamp_ms,
+        end_ms: messages[0].timestamp_ms,
+        message_count: 1,
+        leans: {
+            let mut map = HashMap::new();
+            map.insert(messages[0].sender_name.clone(), 1);
+            map
+        },
+        responses: Vec::new(),
+    };
+
+    for i in 1..n {
+        let prev = &messages[i - 1];
+        let curr = &messages[i];
+        let gap = curr.timestamp_ms.saturating_sub(prev.timestamp_ms);
+
+        let active_threshold = if prev.sender_name == curr.sender_name {
+            threshold_same
+        } else {
+            threshold_diff
+        };
+
+        if gap > active_threshold {
+            conversations.push(current_convo);
+            current_convo = ConvoData {
+                id: conversations.len() as u64,
+                start_ms: curr.timestamp_ms,
+                end_ms: curr.timestamp_ms,
+                message_count: 1,
+                leans: {
+                    let mut map = HashMap::new();
+                    map.insert(curr.sender_name.clone(), 1);
+                    map
+                },
+                responses: Vec::new(),
+            };
+        } else {
+            current_convo.end_ms = curr.timestamp_ms;
+            current_convo.message_count += 1;
+            *current_convo.leans.entry(curr.sender_name.clone()).or_insert(0) += 1;
+            if curr.sender_name != prev.sender_name {
+                current_convo.responses.push(gap);
+            }
+        }
+    }
+    // push the last one
+    conversations.push(current_convo);
+
+    conversations.retain(|c| c.message_count >= 3);
+
+    let mut py_convos = Vec::new();
+    let mut total_responses: u64 = 0;
+    let mut response_count: usize = 0;
+    let mut global_leans: HashMap<String, f64> = HashMap::new();
+    let mut prev_convo_end: Option<u64> = None;
+    let mut gaps_between: Vec<u64> = Vec::new();
+    let mut convos_per_day: HashMap<String, usize> = HashMap::new();
+
+    let total_valid_convos = conversations.len();
+
+    // we might need chrono here.
+    use chrono::{DateTime, Utc};
+    
+    for (idx, c) in conversations.iter_mut().enumerate() {
+        c.id = idx as u64;
+
+        let convo_dict = pyo3::types::PyDict::new(py);
+        convo_dict.set_item("id", c.id).unwrap();
+        convo_dict.set_item("start_ms", c.start_ms).unwrap();
+        convo_dict.set_item("end_ms", c.end_ms).unwrap();
+        convo_dict.set_item("message_count", c.message_count).unwrap();
+        
+        let mut sum_resp: u64 = 0;
+        for r in &c.responses {
+            sum_resp += r;
+            total_responses += r;
+        }
+        response_count += c.responses.len();
+        
+        let avg_resp = if c.responses.is_empty() {
+            0.0
+        } else {
+            sum_resp as f64 / c.responses.len() as f64
+        };
+        convo_dict.set_item("average_response_time", avg_resp).unwrap();
+
+        let leans_dict = pyo3::types::PyDict::new(py);
+        for (sender, count) in &c.leans {
+            let pct = *count as f64 / c.message_count as f64;
+            leans_dict.set_item(sender, pct).unwrap();
+            *global_leans.entry(sender.clone()).or_insert(0.0) += pct;
+        }
+        convo_dict.set_item("leans", leans_dict).unwrap();
+        py_convos.push(convo_dict);
+
+        if let Some(pend) = prev_convo_end {
+            let g = c.start_ms.saturating_sub(pend);
+            gaps_between.push(g);
+        }
+        prev_convo_end = Some(c.end_ms);
+
+        let dt = DateTime::from_timestamp_millis(c.start_ms as i64).unwrap_or_default();
+        let formatted = dt.format("%Y-%m-%d").to_string();
+        *convos_per_day.entry(formatted).or_insert(0) += 1;
+    }
+
+    let thread_agg_dict = pyo3::types::PyDict::new(py);
+    thread_agg_dict.set_item("total_conversations", total_valid_convos).unwrap();
+
+    let avg_in_convo_response_time = if response_count == 0 {
+        0.0
+    } else {
+        total_responses as f64 / response_count as f64
+    };
+    thread_agg_dict.set_item("avg_in_convo_response_time", avg_in_convo_response_time).unwrap();
+
+    let avg_time_between_convos = if gaps_between.is_empty() {
+        0.0
+    } else {
+        let sum_gap: u64 = gaps_between.iter().sum();
+        sum_gap as f64 / gaps_between.len() as f64
+    };
+    thread_agg_dict.set_item("avg_time_between_convos", avg_time_between_convos).unwrap();
+
+    let avg_leans_dict = pyo3::types::PyDict::new(py);
+    if total_valid_convos > 0 {
+        for (sender, sum_pct) in &global_leans {
+            avg_leans_dict.set_item(sender, sum_pct / total_valid_convos as f64).unwrap();
+        }
+    }
+    thread_agg_dict.set_item("avg_participation_leans", avg_leans_dict).unwrap();
+
+    let cpd_dict = pyo3::types::PyDict::new(py);
+    for (date_str, c) in &convos_per_day {
+        cpd_dict.set_item(date_str, *c).unwrap();
+    }
+    thread_agg_dict.set_item("convos_per_day", cpd_dict).unwrap();
+
+    let out = pyo3::types::PyDict::new(py);
+    let out_list = pyo3::types::PyList::new(py, py_convos).unwrap();
+    out.set_item("conversations", out_list).unwrap();
+    out.set_item("thread_aggregation", thread_agg_dict).unwrap();
+
+    Ok(out.into())
+}
+
 #[pymodule]
 fn density_finder_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_highest_density_period, m)?)?;
     m.add_function(wrap_pyfunction!(find_participant_density_period, m)?)?;
-    Ok(())
+        m.add_function(wrap_pyfunction!(detect_conversations, m)?)?;
+Ok(())
 }

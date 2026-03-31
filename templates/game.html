@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guess The Chat</title>
+    <script>
+        window.tailwind = { config: { darkMode: 'class' } };
+        const savedTheme = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
+            document.documentElement.classList.add('dark');
+        }
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors">
+    <div class="container mx-auto px-4 py-8 pb-40">
+        <div class="flex justify-between items-center mb-8 flex-wrap gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Guess Whose Chat You Are Reading</h1>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">You: {{ current_username or '-' }}</p>
+            </div>
+            <div class="flex gap-3 flex-wrap">
+                <a href="/dashboard" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">Dashboard</a>
+                <button type="button" onclick="toggleTheme()" class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200" aria-label="Toggle theme" title="Toggle theme">
+                    <span id="theme-icon">🌙</span>
+                </button>
+                <a href="/logout" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">Logout</a>
+            </div>
+        </div>
+
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-5 mb-5">
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                <div>
+                    <label for="mode-select" class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Mode</label>
+                    <select id="mode-select" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white text-sm">
+                        <option value="message">Message Mode</option>
+                        <option value="stats">Stats Mode</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="difficulty-select" class="block text-xs text-gray-500 dark:text-gray-400 mb-1">Difficulty</label>
+                    <select id="difficulty-select" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white text-sm">
+                        <option value="easy">Easy</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="hard">Hard</option>
+                    </select>
+                </div>
+                <div class="flex items-end">
+                    <button id="new-round-btn" class="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors">Start New Round</button>
+                </div>
+                <div class="flex items-end">
+                    <button id="clear-result-btn" class="w-full px-4 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-lg transition-colors">Clear Result</button>
+                </div>
+            </div>
+
+            <div class="mt-4 flex flex-wrap gap-2" id="meta-strip">
+                <span class="px-3 py-1 rounded-full text-xs bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Mode: -</span>
+                <span class="px-3 py-1 rounded-full text-xs bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Difficulty: -</span>
+                <span class="px-3 py-1 rounded-full text-xs bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Locked Period: -</span>
+                <span class="px-3 py-1 rounded-full text-xs bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200">Participants: -</span>
+            </div>
+
+            <p id="result" class="mt-4 text-sm font-semibold min-h-5"></p>
+        </div>
+
+        <div id="content-area" class="space-y-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                <p class="text-gray-400 dark:text-gray-500 text-lg">Round data will appear here.</p>
+            </div>
+        </div>
+    </div>
+
+    <footer class="fixed left-0 right-0 bottom-0 z-50 border-t border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-900/95 backdrop-blur">
+        <div class="container mx-auto px-4 py-3">
+            <div class="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-3 items-center">
+                <select id="guess-select" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white">
+                    <option value="">Choose who this chat belongs to...</option>
+                </select>
+                <button id="submit-guess-btn" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors">Submit Guess</button>
+                <button id="refresh-options-btn" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">Refresh List</button>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        const UPLOADER_USERNAME = "{{ current_username or '' }}";
+
+        const state = {
+            roundId: null,
+            mode: 'message',
+            difficulty: 'medium',
+            options: [],
+            roundData: null,
+            revealSenders: false,
+        };
+
+        const modeSelect = document.getElementById('mode-select');
+        const difficultySelect = document.getElementById('difficulty-select');
+        const guessSelect = document.getElementById('guess-select');
+        const contentArea = document.getElementById('content-area');
+        const resultNode = document.getElementById('result');
+        const metaStrip = document.getElementById('meta-strip');
+
+        function setThemeIcon() {
+            const icon = document.getElementById('theme-icon');
+            if (!icon) return;
+            const isDark = document.documentElement.classList.contains('dark');
+            icon.textContent = isDark ? '☀️' : '🌙';
+        }
+
+        function toggleTheme() {
+            document.documentElement.classList.toggle('dark');
+            const isDark = document.documentElement.classList.contains('dark');
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            setThemeIcon();
+        }
+
+        setThemeIcon();
+
+        function fmtDate(ms) {
+            if (!ms) return '-';
+            return new Date(ms).toLocaleString();
+        }
+
+        function fmtDay(ms) {
+            if (!ms) return '-';
+            return new Date(ms).toLocaleDateString();
+        }
+
+        function fmtDuration(ms) {
+            if (ms == null || Number.isNaN(ms)) return '-';
+            const total = Math.max(0, Math.floor(ms));
+            const days = Math.floor(total / 86400000);
+            const hours = Math.floor((total % 86400000) / 3600000);
+            const minutes = Math.floor((total % 3600000) / 60000);
+            const seconds = Math.floor((total % 60000) / 1000);
+            if (days > 0) return `${days}d ${hours}h`;
+            if (hours > 0) return `${hours}h ${minutes}m`;
+            if (minutes > 0) return `${minutes}m ${seconds}s`;
+            return `${seconds}s`;
+        }
+
+        function fmtNumber(value, digits = 1) {
+            if (value == null || Number.isNaN(value)) return '-';
+            return Number(value).toLocaleString(undefined, {
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits,
+            });
+        }
+
+        function escapeHtml(text) {
+            if (text == null) return '';
+            return String(text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function setResult(text, ok = false) {
+            resultNode.textContent = text || '';
+            resultNode.className = ok
+                ? 'mt-4 text-sm font-semibold min-h-5 text-emerald-600 dark:text-emerald-400'
+                : 'mt-4 text-sm font-semibold min-h-5 text-red-600 dark:text-red-400';
+        }
+
+        async function loadOptions() {
+            const res = await fetch('/api/game/options');
+            if (!res.ok) throw new Error('Failed to load options');
+            const data = await res.json();
+            state.options = data.options || [];
+            guessSelect.innerHTML = '<option value="">Choose who this chat belongs to...</option>';
+
+            for (const option of state.options) {
+                const node = document.createElement('option');
+                node.value = option.id;
+                node.textContent = option.title;
+                guessSelect.appendChild(node);
+            }
+        }
+
+        function renderMeta(data) {
+            const chips = [
+                `Mode: ${data.mode || '-'}`,
+                `Difficulty: ${data.difficulty || '-'}`,
+                `Locked Period: ${data.locked_period_days ? `${data.locked_period_days}d` : '-'}`,
+                `Participants: ${data.hint?.participant_count || '-'}`,
+            ];
+            metaStrip.innerHTML = chips.map((v) => `
+                <span class="px-3 py-1 rounded-full text-xs bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200">${escapeHtml(v)}</span>
+            `).join('');
+        }
+
+        function senderNameForView(msg) {
+            // Prefer the actual uploader username if available (for "You" messages)
+            if (msg.sender_actual_name) {
+                return msg.sender_actual_name;
+            }
+            if (state.revealSenders) {
+                return msg.sender_name || msg.sender_display || msg.sender_label || 'Unknown';
+            }
+            return msg.sender_display || msg.sender_label || msg.sender_name || 'Unknown';
+        }
+
+        function isUploaderSender(senderName) {
+            if (!UPLOADER_USERNAME || !senderName) return false;
+            return String(senderName).trim().toLowerCase() === String(UPLOADER_USERNAME).trim().toLowerCase();
+        }
+
+        function senderAlignmentMap(messages) {
+            const unique = [];
+            for (const msg of messages) {
+                const sender = senderNameForView(msg);
+                if (!unique.includes(sender)) unique.push(sender);
+            }
+
+            const map = {};
+            unique.forEach((name) => {
+                if (name === 'You' || isUploaderSender(name)) {
+                    map[name] = 'right';
+                    return;
+                }
+                map[name] = 'left';
+            });
+
+            return map;
+        }
+
+        function renderMessageMode(data) {
+            const messages = data.messages || [];
+            if (messages.length === 0) {
+                contentArea.innerHTML = `
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                        <p class="text-gray-400 dark:text-gray-500 text-lg">No messages found in this segment.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const alignments = senderAlignmentMap(messages);
+            let previousDate = '';
+            let previousSender = '';
+            const html = messages.map((msg) => {
+                const sender = senderNameForView(msg);
+                const alignment = alignments[sender] || 'left';
+                const bubbleWrapClass = alignment === 'right' ? 'justify-end' : 'justify-start';
+                const bubbleClass = alignment === 'right'
+                    ? 'bg-blue-600 text-white rounded-2xl rounded-br-md'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-2xl rounded-bl-md';
+                const senderClass = alignment === 'right'
+                    ? 'text-right text-blue-700 dark:text-blue-300'
+                    : 'text-left text-gray-600 dark:text-gray-300';
+
+                const day = fmtDay(msg.timestamp_ms);
+                const showDay = day !== previousDate;
+                const showSender = showDay || sender !== previousSender;
+                previousDate = day;
+                previousSender = sender;
+
+                const body = msg.content ? escapeHtml(msg.content).replace(/\n/g, '<br>') : '<span class="italic opacity-80">(attachment)</span>';
+
+                return `
+                    ${showDay ? `<div class="flex items-center justify-center my-3"><span class="px-3 py-1 text-xs rounded-full bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300">${escapeHtml(day)}</span></div>` : ''}
+                    <div class="flex ${bubbleWrapClass} mb-2">
+                        <div class="max-w-[88%] sm:max-w-[78%]">
+                            ${showSender ? `<p class="text-xs mb-1 ${senderClass}">${escapeHtml(sender)}</p>` : ''}
+                            <div class="px-3 py-2 shadow-sm ${bubbleClass}">
+                                <p class="text-sm break-words">${body}</p>
+                                <p class="mt-1 text-[11px] ${alignment === 'right' ? 'text-blue-100' : 'text-gray-500 dark:text-gray-400'}">${escapeHtml(fmtDate(msg.timestamp_ms))}</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            contentArea.innerHTML = `
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Message Playback</h2>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 mb-3">${state.revealSenders ? 'Sender names are now revealed for this round.' : 'Guess based on this excerpt. Your messages are labeled You, and everyone else is anonymized as Person 1, Person 2, etc.'}</p>
+                    <div class="h-[68vh] overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-800 p-3">${html}</div>
+                </div>
+            `;
+        }
+
+        function renderSenderStats(messagesBySender, attachmentsBySender = {}) {
+            const entries = Object.entries(messagesBySender || {});
+            if (entries.length === 0) {
+                return '<p class="text-sm text-gray-500 dark:text-gray-400">No sender breakdown available.</p>';
+            }
+
+            return entries.map(([sender, count]) => {
+                const attachments = attachmentsBySender[sender] || 0;
+                return `
+                    <div class="flex justify-between">
+                        <span class="text-gray-700 dark:text-gray-300">${escapeHtml(sender)}</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(String(count))} <span class="text-gray-500 text-sm">(${escapeHtml(String(attachments))} attachments)</span></span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderTimingDetail(label, timingData) {
+            if (!timingData) {
+                return `
+                    <div>
+                        <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">${escapeHtml(label)}: -</p>
+                    </div>
+                `;
+            }
+
+            const msg1 = timingData.msg1;
+            const msg2 = timingData.msg2;
+            const messageContext = (msg1 && msg2)
+                ? `
+                    <div class="text-xs space-y-1 ml-2 mt-1">
+                        <div class="text-gray-500 dark:text-gray-400">
+                            ${escapeHtml(fmtDate(msg1.timestamp_ms))} - ${escapeHtml(msg1.sender_name || 'Unknown')}
+                            <br><span class="italic">"${escapeHtml((msg1.content || '(attachment)').substring(0, 80))}${(msg1.content || '').length > 80 ? '...' : ''}"</span>
+                        </div>
+                        <div class="text-gray-500 dark:text-gray-400">
+                            ${escapeHtml(fmtDate(msg2.timestamp_ms))} - ${escapeHtml(msg2.sender_name || 'Unknown')}
+                            <br><span class="italic">"${escapeHtml((msg2.content || '(attachment)').substring(0, 80))}${(msg2.content || '').length > 80 ? '...' : ''}"</span>
+                        </div>
+                    </div>
+                `
+                : `<p class="text-xs text-gray-500 dark:text-gray-400">From ${escapeHtml(fmtDate(timingData.from))} to ${escapeHtml(fmtDate(timingData.to))}</p>`;
+
+            return `
+                <div>
+                    <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-1">${escapeHtml(label)}: ${escapeHtml(fmtDuration(timingData.time))}</p>
+                    ${messageContext}
+                </div>
+            `;
+        }
+
+        function formatMaybeNumber(value, digits = 1) {
+            if (typeof value !== 'number' || Number.isNaN(value)) return '-';
+            return fmtNumber(value, digits);
+        }
+
+        function renderQuickStatCards(stats) {
+            const senderCount = Object.keys(stats.messages_by_sender || {}).length;
+            const cards = [
+                {
+                    label: 'Total Messages',
+                    value: stats.total_messages ?? '-',
+                    tone: 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+                },
+                {
+                    label: 'Avg per Day',
+                    value: formatMaybeNumber(stats.overall_avg_per_day, 1),
+                    tone: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+                },
+                {
+                    label: 'Active Senders',
+                    value: senderCount,
+                    tone: 'bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
+                },
+                {
+                    label: 'Attachments',
+                    value: stats.attachments ?? '-',
+                    tone: 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+                },
+            ];
+
+            return cards.map((card) => `
+                <div class="rounded-lg p-4 ${card.tone}">
+                    <p class="text-xs uppercase tracking-wide opacity-80">${escapeHtml(String(card.label))}</p>
+                    <p class="text-2xl font-bold mt-1">${escapeHtml(String(card.value))}</p>
+                </div>
+            `).join('');
+        }
+
+        function renderSenderBars(messagesBySender) {
+            const entries = Object.entries(messagesBySender || {});
+            if (entries.length === 0) {
+                return '<p class="text-sm text-gray-500 dark:text-gray-400">No participant activity data available.</p>';
+            }
+
+            const maxCount = Math.max(...entries.map(([, count]) => Number(count) || 0), 1);
+            return entries.map(([sender, count]) => {
+                const numericCount = Number(count) || 0;
+                const widthPct = Math.max(4, Math.round((numericCount / maxCount) * 100));
+                return `
+                    <div>
+                        <div class="flex justify-between text-sm mb-1">
+                            <span class="text-gray-700 dark:text-gray-300">${escapeHtml(sender)}</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(String(numericCount))}</span>
+                        </div>
+                        <div class="h-2 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                            <div class="h-full rounded-full bg-blue-500 dark:bg-blue-400" style="width: ${widthPct}%"></div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderTimingBars(stats) {
+            const gapAvg = stats.gaps?.avg;
+            const responseAvg = stats.responses?.avg;
+            const densityPerDay = (typeof stats.max_density?.count === 'number' && typeof stats.max_density?.days === 'number' && stats.max_density.days > 0)
+                ? (stats.max_density.count / stats.max_density.days)
+                : null;
+
+            const points = [
+                { label: 'Avg Gap', value: gapAvg, text: fmtDuration(gapAvg) },
+                { label: 'Avg Response', value: responseAvg, text: fmtDuration(responseAvg) },
+                {
+                    label: 'Density (msg/day)',
+                    value: densityPerDay,
+                    text: densityPerDay == null ? '-' : `${fmtNumber(densityPerDay, 1)} msg/day`,
+                },
+            ].filter((item) => item.value != null && typeof item.value === 'number' && !Number.isNaN(item.value));
+
+            if (points.length === 0) {
+                return '<p class="text-sm text-gray-500 dark:text-gray-400">Timing signal data is unavailable for this round.</p>';
+            }
+
+            const maxValue = Math.max(...points.map((item) => item.value), 1);
+            return points.map((item) => {
+                const widthPct = Math.max(8, Math.round((item.value / maxValue) * 100));
+                return `
+                    <div>
+                        <div class="flex justify-between text-sm mb-1">
+                            <span class="text-gray-700 dark:text-gray-300">${escapeHtml(item.label)}</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(item.text)}</span>
+                        </div>
+                        <div class="h-2 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                            <div class="h-full rounded-full bg-emerald-500 dark:bg-emerald-400" style="width: ${widthPct}%"></div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderStatsMode(data) {
+            const stats = data.stats || {};
+
+            if (Object.keys(stats).length === 0) {
+                contentArea.innerHTML = `
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                        <p class="text-gray-400 dark:text-gray-500 text-lg">No stats available for this round.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const senderStatsHTML = renderSenderStats(stats.messages_by_sender, stats.attachments_by_sender || {});
+            const lengthBySenderEntries = Object.entries(stats.average_message_length?.by_sender || {});
+            const quickCardsHTML = renderQuickStatCards(stats);
+            const senderBarsHTML = renderSenderBars(stats.messages_by_sender || {});
+            const timingBarsHTML = renderTimingBars(stats);
+
+            contentArea.innerHTML = `
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Stats Mode Snapshot</h2>
+                    <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">Dashboard-style summary only. No messages are shown in this mode.</p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                    ${quickCardsHTML}
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Message Statistics</h3>
+                    <div class="space-y-2">
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">Total Messages</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(String(stats.total_messages ?? '-'))}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">Attachments (no text)</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(String(stats.attachments ?? '-'))}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-700 dark:text-gray-300">Overall Avg per Day</span>
+                            <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(fmtNumber(stats.overall_avg_per_day, 1))}</span>
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600 my-3">
+                        ${senderStatsHTML}
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Participant Activity Snapshot</h3>
+                        <div class="space-y-3">
+                            ${senderBarsHTML}
+                        </div>
+                    </div>
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Timing Snapshot</h3>
+                        <div class="space-y-3">
+                            ${timingBarsHTML}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Message Range</h3>
+                    <div class="space-y-3">
+                        <div>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Oldest Message</p>
+                            <p class="text-gray-900 dark:text-white">${escapeHtml(fmtDate(stats.oldest_timestamp_ms))}</p>
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600">
+                        <div>
+                            <p class="text-sm text-gray-600 dark:text-gray-400">Latest Message</p>
+                            <p class="text-gray-900 dark:text-white">${escapeHtml(fmtDate(stats.latest_timestamp_ms))}</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Timing Analysis</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">Average Gap Between Messages</p>
+                            <p class="text-xl font-semibold text-gray-900 dark:text-white">${escapeHtml(fmtDuration(stats.gaps?.avg))}</p>
+                        </div>
+                        <div>
+                            <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">Average Response Time</p>
+                            <p class="text-xl font-semibold text-gray-900 dark:text-white">${escapeHtml(fmtDuration(stats.responses?.avg))}</p>
+                        </div>
+                        <hr class="border-gray-300 dark:border-gray-600">
+                        ${renderTimingDetail('Longest Gap', stats.gaps?.max)}
+                        ${renderTimingDetail('Shortest Gap', stats.gaps?.min)}
+                        <hr class="border-gray-300 dark:border-gray-600">
+                        ${renderTimingDetail('Longest Response', stats.responses?.max)}
+                        ${renderTimingDetail('Shortest Response', stats.responses?.min)}
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Density Snapshot</h3>
+                        <div class="space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-700 dark:text-gray-300">Window Length</span>
+                                <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(String(stats.max_density?.days ?? '-'))} days</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-700 dark:text-gray-300">Messages in Window</span>
+                                <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(String(stats.max_density?.count ?? '-'))}</span>
+                            </div>
+                            <div>
+                                <p class="text-sm text-gray-600 dark:text-gray-400">Window Start</p>
+                                <p class="text-gray-900 dark:text-white">${escapeHtml(fmtDate(stats.max_density?.start_ms))}</p>
+                            </div>
+                            <div>
+                                <p class="text-sm text-gray-600 dark:text-gray-400">Window End</p>
+                                <p class="text-gray-900 dark:text-white">${escapeHtml(fmtDate(stats.max_density?.end_ms))}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Message Length</h3>
+                        <div class="space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-700 dark:text-gray-300">Overall Average Length</span>
+                                <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(fmtNumber(stats.average_message_length?.overall, 1))} chars</span>
+                            </div>
+                            <hr class="border-gray-300 dark:border-gray-600 my-3">
+                            ${lengthBySenderEntries.length === 0 ? '<p class="text-sm text-gray-500 dark:text-gray-400">No per-sender length data.</p>' : lengthBySenderEntries.map(([sender, avg]) => `
+                                <div class="flex justify-between">
+                                    <span class="text-gray-700 dark:text-gray-300">${escapeHtml(sender)}</span>
+                                    <span class="font-semibold text-gray-900 dark:text-white">${escapeHtml(fmtNumber(avg, 1))} chars</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function startRound() {
+            state.mode = modeSelect.value;
+            state.difficulty = difficultySelect.value;
+            state.revealSenders = false;
+            state.roundData = null;
+            setResult('', true);
+            contentArea.innerHTML = `
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                    <p class="text-gray-500 dark:text-gray-400 text-lg">Loading round...</p>
+                </div>
+            `;
+
+            const res = await fetch('/api/game/round', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: state.mode, difficulty: state.difficulty }),
+            });
+
+            const data = await res.json();
+            if (!res.ok) {
+                state.roundId = null;
+                setResult(data.error || 'Failed to start round', false);
+                contentArea.innerHTML = `
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                        <p class="text-gray-400 dark:text-gray-500 text-lg">Round data will appear here.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            state.roundId = data.round_id;
+            state.roundData = data;
+            renderMeta(data);
+            if (data.mode === 'message') {
+                renderMessageMode(data);
+            } else {
+                renderStatsMode(data);
+            }
+        }
+
+        async function submitGuess() {
+            if (!state.roundId) {
+                setResult('Start a round before guessing.', false);
+                return;
+            }
+
+            const conversationId = guessSelect.value;
+            if (!conversationId) {
+                setResult('Pick a conversation from the selector first.', false);
+                return;
+            }
+
+            const res = await fetch('/api/game/guess', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ round_id: state.roundId, conversation_id: conversationId }),
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+                setResult(data.error || 'Guess failed', false);
+                return;
+            }
+
+            if (data.correct) {
+                setResult(`Correct. It was ${data.correct_title}.`, true);
+            } else {
+                setResult(`Wrong. Correct answer: ${data.correct_title}.`, false);
+            }
+
+            if (state.mode === 'message' && state.roundData) {
+                state.revealSenders = true;
+                renderMessageMode(state.roundData);
+            }
+        }
+
+        document.getElementById('new-round-btn').addEventListener('click', () => {
+            startRound().catch((err) => setResult(err.message || 'Failed to start round', false));
+        });
+
+        document.getElementById('submit-guess-btn').addEventListener('click', () => {
+            submitGuess().catch((err) => setResult(err.message || 'Failed to submit guess', false));
+        });
+
+        document.getElementById('refresh-options-btn').addEventListener('click', () => {
+            loadOptions().then(() => setResult('Conversation list refreshed.', true)).catch((err) => setResult(err.message || 'Failed to refresh options', false));
+        });
+
+        document.getElementById('clear-result-btn').addEventListener('click', () => {
+            setResult('', true);
+        });
+
+        // Initial load: populate guess selector and start first round.
+        loadOptions()
+            .then(() => startRound())
+            .catch((err) => {
+                setResult(err.message || 'Failed to initialize game', false);
+            });
+    </script>
+</body>
+</html>

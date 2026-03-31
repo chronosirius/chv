@@ -8,12 +8,22 @@ import datetime
 import shutil
 import threading
 import time
+import traceback
 from glob import glob
 from pathlib import Path
-from collections import Counter
 from dotenv import load_dotenv
-import emoji
-from density_finder_rs import find_highest_density_period, find_participant_density_period # type: ignore 
+from density_finder_rs import (
+    find_highest_density_period,
+    find_participant_density_period,
+    compute_top_words,
+    compute_top_emojis,
+    count_specific_string,
+    aggregate_daily_counts,
+    split_sent_received_daily_counts,
+    build_group_chat_trends_series,
+    build_uploader_trends_series,
+)  # type: ignore
+from game_blueprint import game_bp
 
 load_dotenv()
 
@@ -29,6 +39,9 @@ app.config['COMPUTE_PASSCODE'] = os.getenv('COMPUTE_PASSCODE', 'your_secret_pass
 Path(app.config['UPLOAD_FOLDER']).mkdir(exist_ok=True)
 Path(app.config['CHUNK_FOLDER']).mkdir(exist_ok=True)
 
+# Game routes are isolated in a dedicated blueprint.
+app.register_blueprint(game_bp)
+
 def cleanup_old_data():
     """Remove user data older than 3 days"""
     if not os.path.exists(app.config['UPLOAD_FOLDER']):
@@ -38,6 +51,9 @@ def cleanup_old_data():
     for user_folder in os.listdir(app.config['UPLOAD_FOLDER']):
         user_path = os.path.join(app.config['UPLOAD_FOLDER'], user_folder)
         if os.path.isdir(user_path):
+            keepfolder_path = os.path.join(user_path, 'keep.txt')
+            if os.path.exists(keepfolder_path):
+                continue
             created_time = datetime.datetime.fromtimestamp(os.path.getctime(user_path))
             if created_time < three_days_ago:
                 shutil.rmtree(user_path)
@@ -64,6 +80,179 @@ def cleanup_daemon():
 # Start cleanup daemon
 cleanup_thread = threading.Thread(target=cleanup_daemon, daemon=True)
 cleanup_thread.start()
+
+
+class GroupTrendsJob:
+    """Tracks one in-flight group trends computation per user."""
+    def __init__(self, thread):
+        self.thread = thread
+        self.started_at = time.time()
+        self.error = None
+
+
+group_trends_jobs = {}
+group_trends_jobs_lock = threading.Lock()
+group_trends_series_cache = {}
+group_trends_series_cache_lock = threading.Lock()
+
+uploader_trends_jobs = {}
+uploader_trends_jobs_lock = threading.Lock()
+uploader_trends_series_cache = {}
+uploader_trends_series_cache_lock = threading.Lock()
+
+
+def _build_group_chat_precomputed_trends(group_chats):
+    """Build aggregate totals and moving-average trends for day and week buckets."""
+    daily, weekly = build_group_chat_trends_series(group_chats or [])
+    daily_keys, daily_totals, daily_trend, daily_window = daily
+    weekly_keys, weekly_totals, weekly_trend, weekly_window = weekly
+
+    return {
+        'daily': {
+            'keys': daily_keys,
+            'totals': daily_totals,
+            'trend': daily_trend,
+            'window': daily_window
+        },
+        'weekly': {
+            'keys': weekly_keys,
+            'totals': weekly_totals,
+            'trend': weekly_trend,
+            'window': weekly_window
+        }
+    }
+
+
+def _build_uploader_precomputed_trends(sent_daily_counts, received_daily_counts):
+    """Build daily/weekly totals and moving-average trends for sent/received counts."""
+    sent_series, received_series = build_uploader_trends_series(
+        sent_daily_counts or {},
+        received_daily_counts or {}
+    )
+
+    def _series_to_payload(series):
+        daily_keys, daily_totals, daily_trend, daily_window, weekly_keys, weekly_totals, weekly_trend, weekly_window = series
+        return {
+            'keys': daily_keys,
+            'daily': {
+                'totals': daily_totals,
+                'trend': daily_trend,
+                'window': daily_window
+            },
+            'weekly': {
+                'keys': weekly_keys,
+                'totals': weekly_totals,
+                'trend': weekly_trend,
+                'window': weekly_window
+            }
+        }
+
+    return {
+        'sent': _series_to_payload(sent_series),
+        'received': _series_to_payload(received_series)
+    }
+
+
+def compute_group_chat_trends(user_code):
+    """Compute and cache aggregated group chat trends for a user."""
+    cache_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_group_chat_trends.json')
+
+    # If another request already produced cache, avoid recomputing.
+    if os.path.exists(cache_path):
+        return
+
+    conversations = get_conversations(user_code)
+
+    # Filter to only group chats (more than 1 participant)
+    group_chats = [c for c in conversations if len(c.get('participants', [])) > 1]
+
+    result = []
+    for conv in group_chats:
+        messages = load_conversation_data(user_code, conv['id'])
+        daily_counts = aggregate_daily_counts(messages)
+
+        result.append({
+            'id': conv['id'],
+            'title': conv['title'],
+            'daily_counts': daily_counts  # {YYYY-MM-DD: count}
+        })
+
+    with open(cache_path, 'w') as f:
+        json.dump(result, f)
+
+
+def _group_trends_worker(user_code):
+    """Worker thread wrapper that computes trends and tracks failure state."""
+    try:
+        compute_group_chat_trends(user_code)
+        print(f"[CACHE WRITE] Saved group chat trends cache for user {user_code}")
+    except Exception as e:
+        print(f"[GROUP_TRENDS_ERROR] Failed for user {user_code}: {e}")
+        traceback.print_exc()
+        with group_trends_jobs_lock:
+            job = group_trends_jobs.get(user_code)
+            if job:
+                job.error = str(e)
+        return
+
+    # Job is done successfully; clear it so dictionary doesn't grow forever.
+    with group_trends_jobs_lock:
+        group_trends_jobs.pop(user_code, None)
+
+
+def compute_uploader_message_trends(user_code):
+    """Compute and cache uploader sent/received message counts over time."""
+    cache_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_uploader_message_trends.json')
+
+    if os.path.exists(cache_path):
+        return
+
+    uploader_username = load_uploader_name(user_code)
+    if not uploader_username:
+        with open(cache_path, 'w') as f:
+            json.dump({
+                'uploader_username': None,
+                'sent_daily_counts': {},
+                'received_daily_counts': {}
+            }, f)
+        return
+
+    conversations = get_conversations(user_code)
+    sent_daily_counts = {}
+    received_daily_counts = {}
+
+    for conv in conversations:
+        messages = load_conversation_data(user_code, conv['id'])
+        sent_chunk, received_chunk = split_sent_received_daily_counts(messages, uploader_username)
+        for day_key, count in sent_chunk.items():
+            sent_daily_counts[day_key] = sent_daily_counts.get(day_key, 0) + int(count)
+        for day_key, count in received_chunk.items():
+            received_daily_counts[day_key] = received_daily_counts.get(day_key, 0) + int(count)
+
+    with open(cache_path, 'w') as f:
+        json.dump({
+            'uploader_username': uploader_username,
+            'sent_daily_counts': sent_daily_counts,
+            'received_daily_counts': received_daily_counts
+        }, f)
+
+
+def _uploader_trends_worker(user_code):
+    """Worker thread wrapper that computes uploader trends and tracks failure state."""
+    try:
+        compute_uploader_message_trends(user_code)
+        print(f"[CACHE WRITE] Saved uploader message trends cache for user {user_code}")
+    except Exception as e:
+        print(f"[UPLOADER_TRENDS_ERROR] Failed for user {user_code}: {e}")
+        traceback.print_exc()
+        with uploader_trends_jobs_lock:
+            job = uploader_trends_jobs.get(user_code)
+            if job:
+                job.error = str(e)
+        return
+
+    with uploader_trends_jobs_lock:
+        uploader_trends_jobs.pop(user_code, None)
 
 # def find_highest_density_period(data, window_days=5):
 #     """Find the period with highest message density"""
@@ -154,6 +343,60 @@ def load_conversation_data(user_code, conversation_id):
     
     messages = sorted(messages, key=lambda x: x['timestamp_ms'])
     return messages
+
+
+def find_uploader_name_from_marker(user_code):
+    """Find uploader username via the exact marker message in extracted inbox data."""
+    inbox_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'inbox')
+    if not os.path.exists(inbox_path):
+        return None
+
+    marker_text = 'You sent an attachment.'
+
+    for root, _, _ in os.walk(inbox_path):
+        message_files = glob(os.path.join(root, 'message_*.json'))
+        for file_path in message_files:
+            try:
+                with open(file_path, encoding="raw_unicode_escape") as f:
+                    data = json.loads(f.read().encode('raw_unicode_escape').decode())
+
+                for message in data.get('messages', []):
+                    if message.get('content') == marker_text:
+                        sender_name = message.get('sender_name')
+                        if sender_name:
+                            return sender_name
+            except Exception:
+                # Ignore malformed files and keep scanning.
+                continue
+
+    return None
+
+
+def load_uploader_name(user_code):
+    """Load uploader username from top-level me.json for a user code."""
+    if not user_code:
+        return None
+
+    me_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'me.json')
+    if not os.path.exists(me_path):
+        return None
+
+    try:
+        with open(me_path, 'r') as f:
+            payload = json.load(f)
+        username = payload.get('username')
+        return username if isinstance(username, str) and username.strip() else None
+    except Exception:
+        return None
+
+
+@app.context_processor
+def inject_template_user_context():
+    """Expose uploader username globally so templates can render subtitle context."""
+    active_code = session.get('user_code') or session.get('pending_user_code')
+    return {
+        'current_username': load_uploader_name(active_code)
+    }
 
 @app.route('/')
 def index():
@@ -326,11 +569,49 @@ def upload_complete():
     
     # Clean up chunks
     shutil.rmtree(chunk_dir)
+
+    # Resolve and persist uploader identity immediately after successful extraction.
+    uploader_name = find_uploader_name_from_marker(user_code)
+    if not uploader_name:
+        session['pending_user_code'] = user_code
+        return jsonify({
+            'code': user_code,
+            'needs_username': True,
+            'message': 'Could not determine uploader automatically. Please enter your username.'
+        })
+
+    with open(os.path.join(user_path, 'me.json'), 'w') as f:
+        json.dump({'username': uploader_name}, f)
     
     # Store in session
     session['user_code'] = user_code
+    session.pop('pending_user_code', None)
     
     return jsonify({'code': user_code})
+
+
+@app.route('/upload/set_me', methods=['POST'])
+def upload_set_me():
+    """Persist uploader username when auto-detection was not possible."""
+    payload = request.get_json(silent=True) or {}
+    code = (payload.get('code') or session.get('pending_user_code') or '').strip()
+    username = (payload.get('username') or '').strip()
+
+    if not code:
+        return jsonify({'error': 'Missing upload code'}), 400
+    if not username:
+        return jsonify({'error': 'Username is required'}), 400
+
+    user_path = os.path.join(app.config['UPLOAD_FOLDER'], code)
+    if not os.path.exists(user_path):
+        return jsonify({'error': 'Upload data not found for this code'}), 404
+
+    with open(os.path.join(user_path, 'me.json'), 'w') as f:
+        json.dump({'username': username}, f)
+
+    session['user_code'] = code
+    session.pop('pending_user_code', None)
+    return jsonify({'success': True, 'code': code})
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -344,6 +625,7 @@ def login():
         return jsonify({'error': 'Invalid code or data expired'}), 404
     
     session['user_code'] = code
+    session.pop('pending_user_code', None)
     return jsonify({'success': True})
 
 @app.route('/dashboard')
@@ -369,7 +651,10 @@ def api_conversation(conversation_id):
     if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json')):
         with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'r') as f:
             cached_data = json.load(f)
-            return jsonify(cached_data)
+            if 'messages' in cached_data:
+                return jsonify(cached_data)
+
+    # If cache exists but doesn't have raw messages (from compact format), rebuild below.
     
     messages = load_conversation_data(session['user_code'], conversation_id)
     
@@ -574,24 +859,8 @@ def compute_word():
     if passcode != app.config['COMPUTE_PASSCODE'] and len(messages) > 15000:
         return jsonify({'error': 'Invalid passcode'}), 403
     
-    # Get all words
-    word_counts = Counter()
-    stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'them', 'their', 'this', 'that', 'these', 'those', 'my', 'your', 'his', 'her', 'its', 'our', 'attachment'}
-    
-    for msg in messages:
-        if 'content' in msg:
-            words = msg['content'].lower().split()
-            for word in words:
-                # Remove punctuation
-                word = ''.join(c for c in word if c.isalnum())
-                if word and word not in stop_words and len(word) > 1:
-                    word_counts[word] += 1
-    
-    if word_counts:
-        most_common = word_counts.most_common(10)
-        return jsonify({'words': most_common})
-    
-    return jsonify({'words': []})
+    most_common = compute_top_words(messages, 10)
+    return jsonify({'words': most_common})
 
 @app.route('/api/compute_emoji', methods=['POST'])
 def compute_emoji():
@@ -601,19 +870,8 @@ def compute_emoji():
     conversation_id = request.json.get('conversation_id')
     messages = load_conversation_data(session['user_code'], conversation_id)
 
-    # Get all emojis
-    emoji_counts = Counter()
-    for msg in messages:
-        if 'content' in msg:
-            for char in msg['content']:
-                if char in emoji.EMOJI_DATA:
-                    emoji_counts[char] += 1
-
-    if emoji_counts:
-        most_common = emoji_counts.most_common(10)
-        return jsonify({'emojis': most_common})
-    
-    return jsonify({'emojis': []})
+    most_common = compute_top_emojis(messages, 10)
+    return jsonify({'emojis': most_common})
 
 @app.route('/api/count_specific_string', methods=['POST'])
 def count_specific_word():
@@ -628,10 +886,7 @@ def count_specific_word():
     
     messages = load_conversation_data(session['user_code'], conversation_id)
 
-    count = 0
-    for msg in messages:
-        if 'content' in msg:
-            count += msg['content'].lower().count(target_string)
+    count = count_specific_string(messages, target_string)
     
     return jsonify({'string': target_string, 'count': count})
 
@@ -647,11 +902,17 @@ def share_chat():
         return jsonify({'error': 'Missing parameters'}), 400
     
     source_path = os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id)
+    target_user_root = os.path.join(app.config['UPLOAD_FOLDER'], target_code)
     target_user_path = os.path.join(app.config['UPLOAD_FOLDER'], target_code, 'inbox')
     target_path = os.path.join(target_user_path, conversation_id)
     
     if not os.path.exists(source_path):
         return jsonify({'error': 'Conversation not found'}), 404
+
+    # Intentionally keep shared target without uploader identity metadata.
+    target_me_path = os.path.join(target_user_root, 'me.json')
+    if os.path.exists(target_me_path):
+        os.remove(target_me_path)
     
     # Create target user path if it doesn't exist
     os.makedirs(target_user_path, exist_ok=True)
@@ -680,6 +941,266 @@ def delete_account():
     
     session.clear()
     return jsonify({'success': True})
+
+@app.route('/trends')
+def trends_dashboard():
+    if 'user_code' not in session:
+        return redirect(url_for('index'))
+    return render_template('trends-dashboard.html')
+
+@app.route('/api/group_chat_trends')
+def api_group_chat_trends():
+    if 'user_code' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    user_code = session['user_code']
+    cache_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_group_chat_trends.json')
+    
+    # Check if cached data exists
+    if os.path.exists(cache_path):
+        print(f"[CACHE HIT] Loading group chat trends from cache for user {user_code}")
+        with open(cache_path, 'r') as f:
+            cached_data = json.load(f)
+
+            all_dates = []
+            month_keys = set()
+            for group_chat in cached_data:
+                for day_key in (group_chat.get('daily_counts') or {}).keys():
+                    all_dates.append(day_key)
+                    if len(day_key) >= 7:
+                        month_keys.add(day_key[:7])
+
+            sorted_month_keys = sorted(month_keys)
+            min_date = min(all_dates) if all_dates else None
+            max_date = max(all_dates) if all_dates else None
+
+            full_requested = str(request.args.get('full', '')).lower() in ('1', 'true', 'yes')
+            months_requested_raw = request.args.get('months', '1')
+            try:
+                months_requested = max(1, int(months_requested_raw))
+            except ValueError:
+                months_requested = 1
+
+            months_loaded = len(sorted_month_keys) if full_requested else min(months_requested, len(sorted_month_keys))
+            allowed_months = set(sorted_month_keys[:months_loaded])
+
+            if full_requested or not sorted_month_keys:
+                response_data = cached_data
+            else:
+                response_data = []
+                for group_chat in cached_data:
+                    daily_counts = group_chat.get('daily_counts') or {}
+                    filtered_daily_counts = {
+                        date_key: count
+                        for date_key, count in daily_counts.items()
+                        if len(date_key) >= 7 and date_key[:7] in allowed_months
+                    }
+
+                    # Skip conversations that have no data in the requested month window.
+                    if not filtered_daily_counts:
+                        continue
+
+                    response_data.append({
+                        'id': group_chat.get('id'),
+                        'title': group_chat.get('title'),
+                        'daily_counts': filtered_daily_counts
+                    })
+
+            loaded_dates = []
+            for group_chat in response_data:
+                loaded_dates.extend((group_chat.get('daily_counts') or {}).keys())
+
+            loaded_min_date = min(loaded_dates) if loaded_dates else None
+            loaded_max_date = max(loaded_dates) if loaded_dates else None
+
+            series_cache_key = (user_code, 'full' if full_requested else f'months:{months_loaded}')
+            cache_mtime = os.path.getmtime(cache_path)
+
+            precomputed_trends = None
+            with group_trends_series_cache_lock:
+                cached_series = group_trends_series_cache.get(series_cache_key)
+                if cached_series and cached_series.get('mtime') == cache_mtime:
+                    precomputed_trends = cached_series.get('value')
+
+            if precomputed_trends is None:
+                precomputed_trends = _build_group_chat_precomputed_trends(response_data)
+                with group_trends_series_cache_lock:
+                    group_trends_series_cache[series_cache_key] = {
+                        'mtime': cache_mtime,
+                        'value': precomputed_trends
+                    }
+
+            return jsonify({
+                'data': response_data,
+                'cached': True,
+                'cache_file': cache_path,
+                'partial': not full_requested,
+                'months_loaded': months_loaded,
+                'total_months': len(sorted_month_keys),
+                'month_keys': sorted_month_keys,
+                'precomputed_trends': precomputed_trends,
+                'range': {
+                    'min_date': min_date,
+                    'max_date': max_date
+                },
+                'loaded_range': {
+                    'min_date': loaded_min_date,
+                    'max_date': loaded_max_date
+                }
+            })
+
+    # No cache yet: start one background computation per user and let clients poll.
+    with group_trends_jobs_lock:
+        existing_job = group_trends_jobs.get(user_code)
+
+        if existing_job and existing_job.thread.is_alive():
+            elapsed = round(time.time() - existing_job.started_at, 2)
+            return jsonify({
+                'status': 'processing',
+                'message': 'Group chat trends are still being computed',
+                'elapsed_seconds': elapsed
+            }), 202
+
+        if existing_job and existing_job.error:
+            # Previous worker failed; clear it so the next call can restart computation.
+            last_error = existing_job.error
+            group_trends_jobs.pop(user_code, None)
+            return jsonify({
+                'status': 'failed',
+                'error': f'Background computation failed: {last_error}'
+            }), 500
+
+        print(f"[CACHE MISS] Starting background group chat trends compute for user {user_code}")
+        worker = threading.Thread(target=_group_trends_worker, args=(user_code,), daemon=True)
+        group_trends_jobs[user_code] = GroupTrendsJob(thread=worker)
+        worker.start()
+
+    return jsonify({
+        'status': 'processing',
+        'message': 'Started background computation for group chat trends'
+    }), 202
+
+
+@app.route('/api/uploader_message_trends')
+def api_uploader_message_trends():
+    if 'user_code' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    user_code = session['user_code']
+    cache_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_uploader_message_trends.json')
+
+    if os.path.exists(cache_path):
+        print(f"[CACHE HIT] Loading uploader message trends from cache for user {user_code}")
+        with open(cache_path, 'r') as f:
+            cached_payload = json.load(f)
+
+        sent_daily_counts = cached_payload.get('sent_daily_counts') or {}
+        received_daily_counts = cached_payload.get('received_daily_counts') or {}
+        all_dates = list(set(sent_daily_counts.keys()) | set(received_daily_counts.keys()))
+        month_keys = sorted({date_key[:7] for date_key in all_dates if isinstance(date_key, str) and len(date_key) >= 7})
+        min_date = min(all_dates) if all_dates else None
+        max_date = max(all_dates) if all_dates else None
+
+        full_requested = str(request.args.get('full', '')).lower() in ('1', 'true', 'yes')
+        months_requested_raw = request.args.get('months', '1')
+        try:
+            months_requested = max(1, int(months_requested_raw))
+        except ValueError:
+            months_requested = 1
+
+        months_loaded = len(month_keys) if full_requested else min(months_requested, len(month_keys))
+        allowed_months = set(month_keys[:months_loaded])
+
+        if full_requested or not month_keys:
+            filtered_sent_counts = sent_daily_counts
+            filtered_received_counts = received_daily_counts
+        else:
+            filtered_sent_counts = {
+                date_key: count
+                for date_key, count in sent_daily_counts.items()
+                if isinstance(date_key, str) and len(date_key) >= 7 and date_key[:7] in allowed_months
+            }
+            filtered_received_counts = {
+                date_key: count
+                for date_key, count in received_daily_counts.items()
+                if isinstance(date_key, str) and len(date_key) >= 7 and date_key[:7] in allowed_months
+            }
+
+        loaded_dates = list(set(filtered_sent_counts.keys()) | set(filtered_received_counts.keys()))
+        loaded_min_date = min(loaded_dates) if loaded_dates else None
+        loaded_max_date = max(loaded_dates) if loaded_dates else None
+
+        series_cache_key = (user_code, 'full' if full_requested else f'months:{months_loaded}')
+        cache_mtime = os.path.getmtime(cache_path)
+
+        precomputed_trends = None
+        with uploader_trends_series_cache_lock:
+            cached_series = uploader_trends_series_cache.get(series_cache_key)
+            if cached_series and cached_series.get('mtime') == cache_mtime:
+                precomputed_trends = cached_series.get('value')
+
+        if precomputed_trends is None:
+            precomputed_trends = _build_uploader_precomputed_trends(
+                filtered_sent_counts,
+                filtered_received_counts
+            )
+            with uploader_trends_series_cache_lock:
+                uploader_trends_series_cache[series_cache_key] = {
+                    'mtime': cache_mtime,
+                    'value': precomputed_trends
+                }
+
+        return jsonify({
+            'data': {
+                'uploader_username': cached_payload.get('uploader_username'),
+                'sent_daily_counts': filtered_sent_counts,
+                'received_daily_counts': filtered_received_counts
+            },
+            'cached': True,
+            'cache_file': cache_path,
+            'partial': not full_requested,
+            'months_loaded': months_loaded,
+            'total_months': len(month_keys),
+            'month_keys': month_keys,
+            'precomputed_trends': precomputed_trends,
+            'range': {
+                'min_date': min_date,
+                'max_date': max_date
+            },
+            'loaded_range': {
+                'min_date': loaded_min_date,
+                'max_date': loaded_max_date
+            }
+        })
+
+    with uploader_trends_jobs_lock:
+        existing_job = uploader_trends_jobs.get(user_code)
+
+        if existing_job and existing_job.thread.is_alive():
+            elapsed = round(time.time() - existing_job.started_at, 2)
+            return jsonify({
+                'status': 'processing',
+                'message': 'Uploader message trends are still being computed',
+                'elapsed_seconds': elapsed
+            }), 202
+
+        if existing_job and existing_job.error:
+            last_error = existing_job.error
+            uploader_trends_jobs.pop(user_code, None)
+            return jsonify({
+                'status': 'failed',
+                'error': f'Background computation failed: {last_error}'
+            }), 500
+
+        print(f"[CACHE MISS] Starting background uploader message trends compute for user {user_code}")
+        worker = threading.Thread(target=_uploader_trends_worker, args=(user_code,), daemon=True)
+        uploader_trends_jobs[user_code] = GroupTrendsJob(thread=worker)
+        worker.start()
+
+    return jsonify({
+        'status': 'processing',
+        'message': 'Started background computation for uploader message trends'
+    }), 202
 
 @app.route('/logout')
 def logout():

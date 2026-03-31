@@ -853,6 +853,26 @@ fn detect_conversations(py: Python, data: &Bound<'_, pyo3::types::PyList>) -> Py
     }
     thread_agg_dict.set_item("convos_per_day", cpd_dict).unwrap();
 
+    // Average message count per conversation session
+    let avg_msg_count_per_convo = if total_valid_convos == 0 {
+        0.0
+    } else {
+        let total_msgs: usize = conversations.iter().map(|c| c.message_count).sum();
+        total_msgs as f64 / total_valid_convos as f64
+    };
+    thread_agg_dict.set_item("avg_msg_count_per_convo", avg_msg_count_per_convo).unwrap();
+
+    // Average duration per conversation session (in milliseconds)
+    let avg_duration_ms_per_convo = if total_valid_convos == 0 {
+        0.0
+    } else {
+        let total_duration: u64 = conversations.iter()
+            .map(|c| c.end_ms.saturating_sub(c.start_ms))
+            .sum();
+        total_duration as f64 / total_valid_convos as f64
+    };
+    thread_agg_dict.set_item("avg_duration_ms_per_convo", avg_duration_ms_per_convo).unwrap();
+
     let out = pyo3::types::PyDict::new(py);
     let out_list = pyo3::types::PyList::new(py, py_convos).unwrap();
     out.set_item("conversations", out_list).unwrap();

@@ -9,3 +9,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.27.2"
+emojis = "0.8.0"
+chrono = "0.4.42"

@@ -1,5 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
+use std::collections::{HashMap, HashSet};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
 const MS_PER_DAY: u64 = 86_400_000;
 
@@ -289,9 +291,364 @@ fn find_participant_density_period(data: &Bound<'_, PyList>, period: u8, partici
     }
 }
 
+#[pyfunction]
+fn compute_top_words(data: &Bound<'_, PyList>, top_n: usize) -> Vec<(String, usize)> {
+    let stop_words: HashSet<&str> = [
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "as", "is", "was", "are", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "i", "you", "he", "she", "it", "we", "they", "them", "their", "this", "that", "these", "those", "my", "your", "his", "her", "its", "our", "attachment",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut word_counts: HashMap<String, usize> = HashMap::new();
+
+    for item in data.iter() {
+        let dict = match item.cast::<pyo3::types::PyDict>() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let content_obj = match dict.get_item("content") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+
+        let content: String = match content_obj.extract() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        for raw_word in content.to_lowercase().split_whitespace() {
+            let cleaned: String = raw_word.chars().filter(|c| c.is_alphanumeric()).collect();
+            if cleaned.chars().count() > 1 && !stop_words.contains(cleaned.as_str()) {
+                *word_counts.entry(cleaned).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut pairs: Vec<(String, usize)> = word_counts.into_iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    pairs.truncate(top_n);
+    pairs
+}
+
+#[pyfunction]
+fn compute_top_emojis(data: &Bound<'_, PyList>, top_n: usize) -> Vec<(String, usize)> {
+    let mut emoji_counts: HashMap<String, usize> = HashMap::new();
+
+    for item in data.iter() {
+        let dict = match item.cast::<pyo3::types::PyDict>() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let content_obj = match dict.get_item("content") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+
+        let content: String = match content_obj.extract() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let mut buf = [0u8; 4];
+        for ch in content.chars() {
+            let ch_str = ch.encode_utf8(&mut buf);
+            if emojis::get(ch_str).is_some() {
+                *emoji_counts.entry(ch.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut pairs: Vec<(String, usize)> = emoji_counts.into_iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    pairs.truncate(top_n);
+    pairs
+}
+
+#[pyfunction]
+fn count_specific_string(data: &Bound<'_, PyList>, target_string: String) -> usize {
+    if target_string.is_empty() {
+        return 0;
+    }
+
+    let needle = target_string.to_lowercase();
+    let mut total = 0usize;
+
+    for item in data.iter() {
+        let dict = match item.cast::<pyo3::types::PyDict>() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let content_obj = match dict.get_item("content") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+
+        let content: String = match content_obj.extract() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let lower = content.to_lowercase();
+        let mut i = 0usize;
+        while let Some(rel) = lower[i..].find(&needle) {
+            total += 1;
+            i += rel + needle.len();
+            if i >= lower.len() {
+                break;
+            }
+        }
+    }
+
+    total
+}
+
+type TrendSeries = (Vec<String>, Vec<u64>, Vec<f64>, usize);
+type UploaderSeries = (Vec<String>, Vec<u64>, Vec<f64>, usize, Vec<String>, Vec<u64>, Vec<f64>, usize);
+
+fn date_key_from_timestamp_ms(timestamp_ms: u64) -> Option<String> {
+    let ts = i64::try_from(timestamp_ms).ok()?;
+    let dt: DateTime<Utc> = DateTime::from_timestamp_millis(ts)?;
+    Some(dt.format("%Y-%m-%d").to_string())
+}
+
+fn parse_valid_date_key(key: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(key, "%Y-%m-%d").ok()
+}
+
+fn moving_average(values: &[u64], window_size: usize) -> Vec<f64> {
+    if window_size == 0 {
+        return vec![0.0; values.len()];
+    }
+
+    let mut out = Vec::with_capacity(values.len());
+    let mut running_sum = 0u64;
+
+    for (i, value) in values.iter().enumerate() {
+        running_sum += *value;
+        if i >= window_size {
+            running_sum -= values[i - window_size];
+        }
+
+        let sample_len = std::cmp::min(window_size, i + 1) as f64;
+        let avg = (running_sum as f64) / sample_len;
+        out.push((avg * 100.0).round() / 100.0);
+    }
+
+    out
+}
+
+fn build_trend_series_from_daily_totals(daily_totals: &HashMap<String, u64>) -> (TrendSeries, TrendSeries) {
+    let mut sorted_daily_keys: Vec<String> = daily_totals.keys().cloned().collect();
+    sorted_daily_keys.sort();
+    let daily_values: Vec<u64> = sorted_daily_keys
+        .iter()
+        .map(|k| *daily_totals.get(k).unwrap_or(&0))
+        .collect();
+    let daily_trend = moving_average(&daily_values, 7);
+
+    let mut weekly_totals: HashMap<String, u64> = HashMap::new();
+    for (date_key, total) in daily_totals {
+        if let Some(date) = parse_valid_date_key(date_key) {
+            let weekday_offset = i64::from(date.weekday().num_days_from_monday());
+            let week_start = (date - Duration::days(weekday_offset))
+                .format("%Y-%m-%d")
+                .to_string();
+            *weekly_totals.entry(week_start).or_insert(0) += *total;
+        }
+    }
+
+    let mut sorted_weekly_keys: Vec<String> = weekly_totals.keys().cloned().collect();
+    sorted_weekly_keys.sort();
+    let weekly_values: Vec<u64> = sorted_weekly_keys
+        .iter()
+        .map(|k| *weekly_totals.get(k).unwrap_or(&0))
+        .collect();
+    let weekly_trend = moving_average(&weekly_values, 4);
+
+    (
+        (sorted_daily_keys, daily_values, daily_trend, 7),
+        (sorted_weekly_keys, weekly_values, weekly_trend, 4),
+    )
+}
+
+fn normalize_daily_counts_from_pydict(daily_counts: &Bound<'_, PyDict>) -> HashMap<String, u64> {
+    let mut normalized: HashMap<String, u64> = HashMap::new();
+
+    for (key_obj, value_obj) in daily_counts.iter() {
+        let date_key: String = match key_obj.extract() {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+
+        if date_key.len() != 10 || parse_valid_date_key(&date_key).is_none() {
+            continue;
+        }
+
+        let count_i64: i64 = match value_obj.extract() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if count_i64 < 0 {
+            continue;
+        }
+
+        let count_u64 = count_i64 as u64;
+        *normalized.entry(date_key).or_insert(0) += count_u64;
+    }
+
+    normalized
+}
+
+#[pyfunction]
+fn aggregate_daily_counts(data: &Bound<'_, PyList>) -> HashMap<String, u64> {
+    let mut daily_counts: HashMap<String, u64> = HashMap::new();
+
+    for item in data.iter() {
+        let dict = match item.cast::<PyDict>() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let ts_obj = match dict.get_item("timestamp_ms") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+
+        let ts: u64 = match ts_obj.extract() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(day_key) = date_key_from_timestamp_ms(ts) {
+            *daily_counts.entry(day_key).or_insert(0) += 1;
+        }
+    }
+
+    daily_counts
+}
+
+#[pyfunction]
+fn split_sent_received_daily_counts(
+    data: &Bound<'_, PyList>,
+    uploader_username: String,
+) -> (HashMap<String, u64>, HashMap<String, u64>) {
+    let mut sent_daily_counts: HashMap<String, u64> = HashMap::new();
+    let mut received_daily_counts: HashMap<String, u64> = HashMap::new();
+
+    for item in data.iter() {
+        let dict = match item.cast::<PyDict>() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let ts_obj = match dict.get_item("timestamp_ms") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+        let ts: u64 = match ts_obj.extract() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let sender_obj = match dict.get_item("sender_name") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+        let sender_name: String = match sender_obj.extract() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if let Some(day_key) = date_key_from_timestamp_ms(ts) {
+            if sender_name == uploader_username {
+                *sent_daily_counts.entry(day_key).or_insert(0) += 1;
+            } else {
+                *received_daily_counts.entry(day_key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    (sent_daily_counts, received_daily_counts)
+}
+
+#[pyfunction]
+fn build_group_chat_trends_series(data: &Bound<'_, PyList>) -> (TrendSeries, TrendSeries) {
+    let mut daily_totals: HashMap<String, u64> = HashMap::new();
+
+    for item in data.iter() {
+        let group_chat = match item.cast::<PyDict>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let daily_counts_obj = match group_chat.get_item("daily_counts") {
+            Ok(Some(v)) => v,
+            _ => continue,
+        };
+        let daily_counts = match daily_counts_obj.cast::<PyDict>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let normalized = normalize_daily_counts_from_pydict(&daily_counts);
+        for (date_key, count) in normalized {
+            *daily_totals.entry(date_key).or_insert(0) += count;
+        }
+    }
+
+    build_trend_series_from_daily_totals(&daily_totals)
+}
+
+#[pyfunction]
+fn build_uploader_trends_series(
+    sent_daily_counts: &Bound<'_, PyDict>,
+    received_daily_counts: &Bound<'_, PyDict>,
+) -> (UploaderSeries, UploaderSeries) {
+    let sent_normalized = normalize_daily_counts_from_pydict(sent_daily_counts);
+    let received_normalized = normalize_daily_counts_from_pydict(received_daily_counts);
+
+    let (sent_daily, sent_weekly) = build_trend_series_from_daily_totals(&sent_normalized);
+    let (received_daily, received_weekly) = build_trend_series_from_daily_totals(&received_normalized);
+
+    (
+        (
+            sent_daily.0,
+            sent_daily.1,
+            sent_daily.2,
+            sent_daily.3,
+            sent_weekly.0,
+            sent_weekly.1,
+            sent_weekly.2,
+            sent_weekly.3,
+        ),
+        (
+            received_daily.0,
+            received_daily.1,
+            received_daily.2,
+            received_daily.3,
+            received_weekly.0,
+            received_weekly.1,
+            received_weekly.2,
+            received_weekly.3,
+        ),
+    )
+}
+
 #[pymodule]
 fn density_finder_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_highest_density_period, m)?)?;
     m.add_function(wrap_pyfunction!(find_participant_density_period, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_top_words, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_top_emojis, m)?)?;
+    m.add_function(wrap_pyfunction!(count_specific_string, m)?)?;
+    m.add_function(wrap_pyfunction!(aggregate_daily_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(split_sent_received_daily_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(build_group_chat_trends_series, m)?)?;
+    m.add_function(wrap_pyfunction!(build_uploader_trends_series, m)?)?;
     Ok(())
 }

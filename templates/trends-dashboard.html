@@ -252,6 +252,13 @@
                 >
                     Sent/Received Trends
                 </button>
+                <button
+                    id="tab-convo-stats"
+                    class="px-4 py-3 text-lg font-semibold text-gray-600 dark:text-gray-400 border-b-2 border-gray-300 dark:border-gray-600"
+                    onclick="switchTab('convo-stats')"
+                >
+                    Conversation Stats
+                </button>
                 <!-- More tabs can be added here in the future -->
             </div>
         </div>
@@ -345,6 +352,22 @@
             </div>
         </div>
 
+        <!-- Conversation Stats Section -->
+        <div id="section-convo-stats" class="trend-section" style="display: none;">
+            <div class="w-full" id="convo-stats-loading-indicator" style="display: none;">
+                <div class="relative h-3 rounded-lg w-full overflow-hidden bg-indigo-100 dark:bg-indigo-900">
+                    <div class="progress-bar-value absolute h-full bg-indigo-500"></div>
+                </div>
+            </div>
+            <div id="convo-stats-chart-card" class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6" style="display: none;">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Conversations per Day (Across All Chats)</h3>
+                <div class="relative h-72">
+                    <canvas id="convo-stats-chart"></canvas>
+                </div>
+            </div>
+            <div id="convo-stats-summary"></div>
+        </div>
+
         <!-- Additional trend sections can be added here -->
     </div>
 
@@ -426,6 +449,8 @@
                 } else {
                     setTimeout(() => refreshUploaderChart(), 0);
                 }
+            } else if (tabName === 'convo-stats') {
+                setTimeout(() => loadConvoStatsTrends(), 0);
             }
         }
 
@@ -1854,6 +1879,192 @@
                 window.location.href = '/';
             } else {
                 alert('Failed to delete data');
+            }
+        }
+
+        // ── Conversation Stats Tab ────────────────────────────────────────────
+        let convoStatsTrendChart = null;
+        let convoStatsTrendData = null;
+        let convoStatsPollInterval = null;
+
+        function formatMs(ms) {
+            if (!ms || ms === 0) return '—';
+            const totalSeconds = Math.floor(ms / 1000);
+            const days = Math.floor(totalSeconds / 86400);
+            const hours = Math.floor((totalSeconds % 86400) / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = totalSeconds % 60;
+            if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+            if (hours > 0) return `${hours}h ${minutes}m`;
+            if (minutes > 0) return `${minutes}m ${seconds}s`;
+            return `${seconds}s`;
+        }
+
+        function escapeHtmlTrends(value) {
+            if (value == null) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderConvoStatsTrends(data) {
+            const summary = document.getElementById('convo-stats-summary');
+            const chartCard = document.getElementById('convo-stats-chart-card');
+            if (!data) {
+                summary.innerHTML = '<p class="text-red-500 text-sm">No data available.</p>';
+                return;
+            }
+
+            // Build convos/day chart
+            const cpd = data.convos_per_day || {};
+            const sortedEntries = Object.entries(cpd).sort((a, b) => a[0].localeCompare(b[0]));
+            if (sortedEntries.length > 0) {
+                const labels = sortedEntries.map(([d]) => d);
+                const values = sortedEntries.map(([, v]) => v);
+                chartCard.style.display = 'block';
+
+                const isDark = document.documentElement.classList.contains('dark');
+                const gridColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+                const textColor = isDark ? '#d1d5db' : '#374151';
+
+                if (convoStatsTrendChart) {
+                    convoStatsTrendChart.destroy();
+                }
+                const ctx = document.getElementById('convo-stats-chart').getContext('2d');
+                convoStatsTrendChart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels,
+                        datasets: [{
+                            label: 'Conversations',
+                            data: values,
+                            backgroundColor: 'rgba(99, 102, 241, 0.6)',
+                            borderColor: 'rgb(99, 102, 241)',
+                            borderWidth: 1,
+                            borderRadius: 3,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: {
+                                ticks: { color: textColor, maxTicksLimit: 20, maxRotation: 45 },
+                                grid: { color: gridColor }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                ticks: { color: textColor, stepSize: 1 },
+                                grid: { color: gridColor }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Participation bars
+            const leans = data.avg_participation_leans || {};
+            const sortedLeans = Object.entries(leans).sort((a, b) => b[1] - a[1]);
+            const leansHtml = sortedLeans.map(([sender, pct]) => {
+                const barWidth = Math.round(pct * 100);
+                return `<div class="mb-2">
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="text-gray-700 dark:text-gray-300 truncate max-w-[60%]">${escapeHtmlTrends(sender)}</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${(pct * 100).toFixed(1)}%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                        <div class="bg-indigo-500 h-2 rounded-full" style="width:${barWidth}%"></div>
+                    </div>
+                </div>`;
+            }).join('');
+
+            const totalDays = sortedEntries.length;
+            const avgCpd = totalDays > 0 ? (data.total_conversations / totalDays).toFixed(2) : '—';
+
+            summary.innerHTML = `
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Global Conversation Aggregates</h3>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5">
+                        <div class="bg-indigo-50 dark:bg-indigo-900/30 rounded-lg p-3">
+                            <p class="text-xs text-indigo-600 dark:text-indigo-300 font-medium uppercase tracking-wide">Total Conversations</p>
+                            <p class="text-2xl font-bold text-indigo-700 dark:text-indigo-200 mt-1">${data.total_conversations}</p>
+                        </div>
+                        <div class="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-3">
+                            <p class="text-xs text-blue-600 dark:text-blue-300 font-medium uppercase tracking-wide">Avg Response Time</p>
+                            <p class="text-2xl font-bold text-blue-700 dark:text-blue-200 mt-1">${formatMs(data.avg_in_convo_response_time)}</p>
+                        </div>
+                        <div class="bg-purple-50 dark:bg-purple-900/30 rounded-lg p-3">
+                            <p class="text-xs text-purple-600 dark:text-purple-300 font-medium uppercase tracking-wide">Avg Between Convos</p>
+                            <p class="text-2xl font-bold text-purple-700 dark:text-purple-200 mt-1">${formatMs(data.avg_time_between_convos)}</p>
+                        </div>
+                        <div class="bg-green-50 dark:bg-green-900/30 rounded-lg p-3">
+                            <p class="text-xs text-green-600 dark:text-green-300 font-medium uppercase tracking-wide">Avg Msgs / Convo</p>
+                            <p class="text-2xl font-bold text-green-700 dark:text-green-200 mt-1">${(data.avg_msg_count_per_convo || 0).toFixed(1)}</p>
+                        </div>
+                        <div class="bg-yellow-50 dark:bg-yellow-900/30 rounded-lg p-3">
+                            <p class="text-xs text-yellow-600 dark:text-yellow-300 font-medium uppercase tracking-wide">Avg Duration</p>
+                            <p class="text-2xl font-bold text-yellow-700 dark:text-yellow-200 mt-1">${formatMs(data.avg_duration_ms_per_convo || 0)}</p>
+                        </div>
+                        <div class="bg-rose-50 dark:bg-rose-900/30 rounded-lg p-3">
+                            <p class="text-xs text-rose-600 dark:text-rose-300 font-medium uppercase tracking-wide">Convos / Active Day</p>
+                            <p class="text-2xl font-bold text-rose-700 dark:text-rose-200 mt-1">${avgCpd}</p>
+                        </div>
+                    </div>
+                    ${leansHtml ? `<div>
+                        <p class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 uppercase tracking-wide">Avg Participation (All Chats)</p>
+                        ${leansHtml}
+                    </div>` : ''}
+                </div>
+            `;
+        }
+
+        async function loadConvoStatsTrends() {
+            if (convoStatsTrendData) {
+                renderConvoStatsTrends(convoStatsTrendData);
+                return;
+            }
+
+            if (convoStatsPollInterval) return;
+
+            const loadingEl = document.getElementById('convo-stats-loading-indicator');
+            const summaryEl = document.getElementById('convo-stats-summary');
+            loadingEl.style.display = 'block';
+            summaryEl.innerHTML = '';
+
+            async function poll() {
+                try {
+                    const resp = await fetch('/api/convo_stats');
+                    if (resp.status === 202) return; // still computing
+                    if (convoStatsPollInterval) {
+                        clearInterval(convoStatsPollInterval);
+                        convoStatsPollInterval = null;
+                    }
+                    loadingEl.style.display = 'none';
+                    if (!resp.ok) {
+                        const err = await resp.json();
+                        summaryEl.innerHTML = `<p class="text-red-500 text-sm">Error: ${escapeHtmlTrends(err.error || 'Unknown error')}</p>`;
+                        return;
+                    }
+                    const result = await resp.json();
+                    convoStatsTrendData = result.data;
+                    renderConvoStatsTrends(convoStatsTrendData);
+                } catch (e) {
+                    if (convoStatsPollInterval) {
+                        clearInterval(convoStatsPollInterval);
+                        convoStatsPollInterval = null;
+                    }
+                    loadingEl.style.display = 'none';
+                    summaryEl.innerHTML = `<p class="text-red-500 text-sm">Network error: ${escapeHtmlTrends(String(e))}</p>`;
+                }
+            }
+
+            await poll();
+            if (!convoStatsTrendData) {
+                convoStatsPollInterval = setInterval(poll, 3000);
             }
         }
 

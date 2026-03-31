@@ -354,14 +354,14 @@ def compute_all_convo_stats(user_code):
                 global_leans[sender] = global_leans.get(sender, 0.0) + pct * total_c
             global_leans_conversation_count += total_c
 
-        amc = thread_agg.get('avg_msg_count_per_convo', 0.0)
-        if amc > 0:
-            global_total_msg_count += amc * total_c
+        avg_msg_count = thread_agg.get('avg_msg_count_per_convo', 0.0)
+        if avg_msg_count > 0:
+            global_total_msg_count += avg_msg_count * total_c
             global_msg_count_conversation_count += total_c
 
-        adc = thread_agg.get('avg_duration_ms_per_convo', 0.0)
-        if adc > 0:
-            global_total_duration_ms += adc * total_c
+        avg_duration_ms = thread_agg.get('avg_duration_ms_per_convo', 0.0)
+        if avg_duration_ms > 0:
+            global_total_duration_ms += avg_duration_ms * total_c
             global_duration_conversation_count += total_c
 
         for date_str, cnt in thread_agg.get('convos_per_day', {}).items():
@@ -810,11 +810,31 @@ def api_conversation(conversation_id):
     if 'user_code' not in session:
         return jsonify({'error': 'Not authenticated'}), 401
     
+    analysis_path = os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json')
+
     # check if cached data exists
-    if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json')):
-        with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'r') as f:
+    if os.path.exists(analysis_path):
+        with open(analysis_path, 'r') as f:
             cached_data = json.load(f)
             if 'messages' in cached_data:
+                # If convo_stats is missing from cache, compute and patch it now
+                if 'convo_stats' not in cached_data:
+                    try:
+                        messages = load_conversation_data(session['user_code'], conversation_id)
+                        thread_result = detect_conversations(messages)
+                        cached_data['convo_stats'] = thread_result.get('thread_aggregation', {})
+                        # Also write the per-session metadata cache
+                        metadata_path = os.path.join(
+                            app.config['UPLOAD_FOLDER'], session['user_code'],
+                            'inbox', conversation_id, 'cached_convo_metadata.json'
+                        )
+                        if not os.path.exists(metadata_path):
+                            with open(metadata_path, 'w') as mf:
+                                json.dump(thread_result, mf)
+                        with open(analysis_path, 'w') as cf:
+                            json.dump(cached_data, cf)
+                    except Exception as e:
+                        print(f"[CONVO_DETECT] Failed to patch convo_stats for {conversation_id}: {e}")
                 return jsonify(cached_data)
 
     # If cache exists but doesn't have raw messages (from compact format), rebuild below.
@@ -934,6 +954,22 @@ def api_conversation(conversation_id):
             "by_sender": {sender: sum(len(m.get('content', '')) for m in messages if m.get('sender_name') == sender) / count for sender, count in messages_by_sender.items()}
         }
     }
+
+    # Compute conversation detection stats and include in analysis
+    try:
+        thread_result = detect_conversations(messages)
+        d['convo_stats'] = thread_result.get('thread_aggregation', {})
+        # Cache the per-session metadata separately
+        metadata_path = os.path.join(
+            app.config['UPLOAD_FOLDER'], session['user_code'],
+            'inbox', conversation_id, 'cached_convo_metadata.json'
+        )
+        if not os.path.exists(metadata_path):
+            with open(metadata_path, 'w') as mf:
+                json.dump(thread_result, mf)
+    except Exception as e:
+        print(f"[CONVO_DETECT] Failed to compute convo_stats for {conversation_id}: {e}")
+
     with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'w') as f:
         json.dump(d, f)
     return jsonify(d)

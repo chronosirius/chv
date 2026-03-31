@@ -892,6 +892,6 @@ fn density_finder_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(split_sent_received_daily_counts, m)?)?;
     m.add_function(wrap_pyfunction!(build_group_chat_trends_series, m)?)?;
     m.add_function(wrap_pyfunction!(build_uploader_trends_series, m)?)?;
-        m.add_function(wrap_pyfunction!(detect_conversations, m)?)?;
-Ok(())
+    m.add_function(wrap_pyfunction!(detect_conversations, m)?)?;
+    Ok(())
 }

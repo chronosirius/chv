@@ -349,6 +349,8 @@
                 const data = await response.json();
                 
                 if (response.ok) {
+                    const authChannel = new BroadcastChannel('chv_auth');
+                    authChannel.postMessage({ type: 'LOGIN' });
                     window.location.href = '/dashboard';
                 } else {
                     status.innerHTML = `<span class="text-red-600 dark:text-red-400">Error: ${data.error}</span>`;
@@ -364,6 +366,15 @@
                 console.error('Service worker registration failed:', err);
             });
         }
+        // Keep auth state in sync across browser tabs
+        var _authChannel = new BroadcastChannel('chv_auth');
+        _authChannel.onmessage = function(e) {
+            if (e.data.type === 'LOGOUT') {
+                window.location.href = '/';
+            } else if (e.data.type === 'LOGIN') {
+                window.location.href = '/dashboard';
+            }
+        };
     </script>
 </body>
 </html>

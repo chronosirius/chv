@@ -53,6 +53,13 @@
                 console.error('Service worker registration failed:', err);
             });
         }
+        // Keep auth state in sync across browser tabs
+        var _authChannel = new BroadcastChannel('chv_auth');
+        _authChannel.onmessage = function(e) {
+            if (e.data.type === 'LOGOUT') {
+                window.location.href = '/';
+            }
+        };
     </script>
 </body>
 </html>

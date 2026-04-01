@@ -39,13 +39,23 @@ self.addEventListener('fetch', (event) => {
     const { request } = event;
     const url = new URL(request.url);
 
-    // Never cache API calls, uploads, or non-GET requests
+    // On logout: clear the static cache so stale user-specific pages are not
+    // served to the next user, then pass the request through to the server.
+    if (url.pathname === '/logout') {
+        event.respondWith(
+            caches.delete(STATIC_CACHE)
+                .catch(() => {})  // ignore cache deletion errors
+                .then(() => fetch(request))
+        );
+        return;
+    }
+
+    // Never cache API calls, uploads, login, or non-GET requests
     if (
         request.method !== 'GET' ||
         url.pathname.startsWith('/api/') ||
         url.pathname.startsWith('/upload/') ||
-        url.pathname === '/login' ||
-        url.pathname === '/logout'
+        url.pathname === '/login'
     ) {
         event.respondWith(fetch(request));
         return;
@@ -67,24 +77,23 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Network-first for app pages, fall back to cache for offline support
+    // Cache-first for app pages – the server already caches its responses, so
+    // serving from the client cache is safe and avoids redundant round-trips.
+    // When the page is not in cache yet, fetch it from the network and store it.
     event.respondWith(
         caches.open(STATIC_CACHE).then((cache) =>
-            fetch(request)
-                .then((response) => {
+            cache.match(request).then((cached) => {
+                if (cached) return cached;
+                return fetch(request).then((response) => {
                     if (response.ok) cache.put(request, response.clone());
                     return response;
-                })
-                .catch(() =>
-                    cache.match(request).then(
-                        (cached) =>
-                            cached ||
-                            new Response('Offline – page not available', {
-                                status: 503,
-                                headers: { 'Content-Type': 'text/plain' },
-                            })
-                    )
-                )
+                }).catch(() =>
+                    new Response('Offline – page not available', {
+                        status: 503,
+                        headers: { 'Content-Type': 'text/plain' },
+                    })
+                );
+            })
         )
     );
 });

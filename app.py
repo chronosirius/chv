@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from density_finder_rs import (
     find_highest_density_period,
     find_participant_density_period,
+    detect_conversations,
     compute_top_words,
     compute_top_emojis,
     count_specific_string,
@@ -254,7 +255,179 @@ def _uploader_trends_worker(user_code):
     with uploader_trends_jobs_lock:
         uploader_trends_jobs.pop(user_code, None)
 
-# def find_highest_density_period(data, window_days=5):
+
+# ── Conversation Detection ────────────────────────────────────────────────────
+
+convo_detection_jobs = {}
+convo_detection_jobs_lock = threading.Lock()
+
+
+class ConvoDetectionJob:
+    """Tracks one in-flight conversation detection computation per user."""
+    def __init__(self, thread):
+        self.thread = thread
+        self.started_at = time.time()
+        self.error = None
+
+
+def compute_all_convo_stats(user_code):
+    """
+    For each conversation thread, run detect_conversations (Rust), cache per-session
+    metadata to cached_convo_metadata.json next to cached_analysis.json, and merge
+    thread-level aggregates into cached_analysis.json under the 'convo_stats' key.
+    A user-level summary is also written to cached_convo_stats.json.
+    """
+    conversations = get_conversations(user_code)
+
+    global_total_convos = 0
+    global_total_response_time = 0.0
+    global_response_time_conversation_count = 0
+    global_leans: dict = {}
+    global_leans_conversation_count = 0
+    global_total_msg_count = 0.0
+    global_msg_count_conversation_count = 0
+    global_total_duration_ms = 0.0
+    global_duration_conversation_count = 0
+    global_convos_per_day: dict = {}
+    global_avg_time_between_convos = 0.0
+    global_time_between_convos_conversation_count = 0
+    per_chat_convos_per_day: dict = {}
+
+    for conv in conversations:
+        conv_id = conv['id']
+        thread_folder = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'inbox', conv_id)
+        metadata_path = os.path.join(thread_folder, 'cached_convo_metadata.json')
+        analysis_path = os.path.join(thread_folder, 'cached_analysis.json')
+
+        # Load or compute per-session metadata for this thread
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r') as f:
+                thread_result = json.load(f)
+        else:
+            messages = load_conversation_data(user_code, conv_id)
+            if not messages:
+                continue
+
+            thread_result = detect_conversations(messages)
+
+            # Cache per-session metadata (without per-message content)
+            try:
+                with open(metadata_path, 'w') as f:
+                    json.dump(thread_result, f)
+            except Exception as e:
+                print(f"[CONVO_DETECT] Failed to write metadata for {conv_id}: {e}")
+
+        # Merge thread-level aggregates into cached_analysis.json
+        thread_agg = thread_result.get('thread_aggregation', {})
+        if thread_agg:
+            try:
+                if os.path.exists(analysis_path):
+                    with open(analysis_path, 'r') as f:
+                        analysis = json.load(f)
+                else:
+                    analysis = {}
+                analysis['convo_stats'] = thread_agg
+                with open(analysis_path, 'w') as f:
+                    json.dump(analysis, f)
+            except Exception as e:
+                print(f"[CONVO_DETECT] Failed to update cached_analysis for {conv_id}: {e}")
+
+        # Accumulate global aggregates
+        total_c = thread_agg.get('total_conversations', 0)
+        if total_c == 0:
+            continue
+
+        global_total_convos += total_c
+
+        art = thread_agg.get('avg_in_convo_response_time', 0.0)
+        if art > 0:
+            global_total_response_time += art * total_c
+            global_response_time_conversation_count += total_c
+
+        atbc = thread_agg.get('avg_time_between_convos', 0.0)
+        if atbc > 0:
+            global_avg_time_between_convos += atbc * total_c
+            global_time_between_convos_conversation_count += total_c
+
+        participation = thread_agg.get('avg_participation_leans', {})
+        if participation:
+            for sender, pct in participation.items():
+                global_leans[sender] = global_leans.get(sender, 0.0) + pct * total_c
+            global_leans_conversation_count += total_c
+
+        avg_msg_count = thread_agg.get('avg_msg_count_per_convo', 0.0)
+        if avg_msg_count > 0:
+            global_total_msg_count += avg_msg_count * total_c
+            global_msg_count_conversation_count += total_c
+
+        avg_duration_ms = thread_agg.get('avg_duration_ms_per_convo', 0.0)
+        if avg_duration_ms > 0:
+            global_total_duration_ms += avg_duration_ms * total_c
+            global_duration_conversation_count += total_c
+
+        chat_cpd = thread_agg.get('convos_per_day', {})
+        for date_str, cnt in chat_cpd.items():
+            global_convos_per_day[date_str] = global_convos_per_day.get(date_str, 0) + cnt
+
+        # Store per-chat conversation counts for the trends chart
+        if chat_cpd:
+            per_chat_convos_per_day[conv_id] = {
+                'title': conv.get('title', conv_id),
+                'convos_per_day': chat_cpd,
+            }
+
+    # Build global summary
+    avg_participation = {}
+    if global_leans_conversation_count > 0:
+        for sender, total_pct in global_leans.items():
+            avg_participation[sender] = total_pct / global_leans_conversation_count
+
+    summary = {
+        'total_conversations': global_total_convos,
+        'avg_in_convo_response_time': (
+            global_total_response_time / global_response_time_conversation_count
+            if global_response_time_conversation_count > 0 else 0.0
+        ),
+        'avg_time_between_convos': (
+            global_avg_time_between_convos / global_time_between_convos_conversation_count
+            if global_time_between_convos_conversation_count > 0 else 0.0
+        ),
+        'avg_participation_leans': avg_participation,
+        'avg_msg_count_per_convo': (
+            global_total_msg_count / global_msg_count_conversation_count
+            if global_msg_count_conversation_count > 0 else 0.0
+        ),
+        'avg_duration_ms_per_convo': (
+            global_total_duration_ms / global_duration_conversation_count
+            if global_duration_conversation_count > 0 else 0.0
+        ),
+        'convos_per_day': global_convos_per_day,
+        'per_chat_convos_per_day': per_chat_convos_per_day,
+    }
+
+    user_stats_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_convo_stats.json')
+    with open(user_stats_path, 'w') as f:
+        json.dump(summary, f)
+
+
+def _convo_detection_worker(user_code):
+    """Background worker that runs conversation detection for all threads."""
+    try:
+        compute_all_convo_stats(user_code)
+        print(f"[CACHE WRITE] Saved convo stats for user {user_code}")
+    except Exception as e:
+        print(f"[CONVO_DETECT_ERROR] Failed for user {user_code}: {e}")
+        traceback.print_exc()
+        with convo_detection_jobs_lock:
+            job = convo_detection_jobs.get(user_code)
+            if job:
+                job.error = str(e)
+        return
+
+    with convo_detection_jobs_lock:
+        convo_detection_jobs.pop(user_code, None)
+
+
 #     """Find the period with highest message density"""
 #     if not data:
 #         return (0, 0)
@@ -647,11 +820,31 @@ def api_conversation(conversation_id):
     if 'user_code' not in session:
         return jsonify({'error': 'Not authenticated'}), 401
     
+    analysis_path = os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json')
+
     # check if cached data exists
-    if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json')):
-        with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'r') as f:
+    if os.path.exists(analysis_path):
+        with open(analysis_path, 'r') as f:
             cached_data = json.load(f)
             if 'messages' in cached_data:
+                # If convo_stats is missing from cache, compute and patch it now
+                if 'convo_stats' not in cached_data:
+                    try:
+                        messages = load_conversation_data(session['user_code'], conversation_id)
+                        thread_result = detect_conversations(messages)
+                        cached_data['convo_stats'] = thread_result.get('thread_aggregation', {})
+                        # Also write the per-session metadata cache
+                        metadata_path = os.path.join(
+                            app.config['UPLOAD_FOLDER'], session['user_code'],
+                            'inbox', conversation_id, 'cached_convo_metadata.json'
+                        )
+                        if not os.path.exists(metadata_path):
+                            with open(metadata_path, 'w') as mf:
+                                json.dump(thread_result, mf)
+                        with open(analysis_path, 'w') as cf:
+                            json.dump(cached_data, cf)
+                    except Exception as e:
+                        print(f"[CONVO_DETECT] Failed to patch convo_stats for {conversation_id}: {e}")
                 return jsonify(cached_data)
 
     # If cache exists but doesn't have raw messages (from compact format), rebuild below.
@@ -771,6 +964,22 @@ def api_conversation(conversation_id):
             "by_sender": {sender: sum(len(m.get('content', '')) for m in messages if m.get('sender_name') == sender) / count for sender, count in messages_by_sender.items()}
         }
     }
+
+    # Compute conversation detection stats and include in analysis
+    try:
+        thread_result = detect_conversations(messages)
+        d['convo_stats'] = thread_result.get('thread_aggregation', {})
+        # Cache the per-session metadata separately
+        metadata_path = os.path.join(
+            app.config['UPLOAD_FOLDER'], session['user_code'],
+            'inbox', conversation_id, 'cached_convo_metadata.json'
+        )
+        if not os.path.exists(metadata_path):
+            with open(metadata_path, 'w') as mf:
+                json.dump(thread_result, mf)
+    except Exception as e:
+        print(f"[CONVO_DETECT] Failed to compute convo_stats for {conversation_id}: {e}")
+
     with open(os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'], 'inbox', conversation_id, 'cached_analysis.json'), 'w') as f:
         json.dump(d, f)
     return jsonify(d)
@@ -1201,6 +1410,62 @@ def api_uploader_message_trends():
         'status': 'processing',
         'message': 'Started background computation for uploader message trends'
     }), 202
+
+
+@app.route('/api/convo_stats')
+def api_convo_stats():
+    """
+    Return aggregated conversation detection statistics for the current user.
+    Only aggregate data is returned (no per-session details).
+    If not yet computed, a background job is started and 202 is returned.
+    """
+    if 'user_code' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    user_code = session['user_code']
+    stats_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_convo_stats.json')
+
+    if os.path.exists(stats_path):
+        print(f"[CACHE HIT] Loading convo stats from cache for user {user_code}")
+        with open(stats_path, 'r') as f:
+            summary = json.load(f)
+        # Invalidate old caches that pre-date per-chat data
+        if 'per_chat_convos_per_day' not in summary:
+            print(f"[CACHE STALE] Invalidating old convo stats cache for user {user_code}")
+            os.remove(stats_path)
+        else:
+            return jsonify({'cached': True, 'data': summary})
+
+    # No cache yet – start background computation if not already running.
+    with convo_detection_jobs_lock:
+        existing_job = convo_detection_jobs.get(user_code)
+
+        if existing_job and existing_job.thread.is_alive():
+            elapsed = round(time.time() - existing_job.started_at, 2)
+            return jsonify({
+                'status': 'processing',
+                'message': 'Conversation stats are still being computed',
+                'elapsed_seconds': elapsed
+            }), 202
+
+        if existing_job and existing_job.error:
+            last_error = existing_job.error
+            convo_detection_jobs.pop(user_code, None)
+            return jsonify({
+                'status': 'failed',
+                'error': f'Background computation failed: {last_error}'
+            }), 500
+
+        print(f"[CACHE MISS] Starting background convo detection for user {user_code}")
+        worker = threading.Thread(target=_convo_detection_worker, args=(user_code,), daemon=True)
+        convo_detection_jobs[user_code] = ConvoDetectionJob(thread=worker)
+        worker.start()
+
+    return jsonify({
+        'status': 'processing',
+        'message': 'Started background computation for conversation stats'
+    }), 202
+
 
 @app.route('/logout')
 def logout():

@@ -970,6 +970,8 @@
                 </div>
 
                 <div id="custom-boxes"></div>
+
+                ${buildConvoStatsHtml(currentData.convo_stats)}
             `;
 
             // Populate participant select dropdown
@@ -1327,6 +1329,73 @@
             customBoxes.forEach(box => {
                 box.render(currentData);
             });
+        }
+
+        function formatMs(ms) {
+            if (!ms || ms === 0) return '—';
+            const totalSeconds = Math.floor(ms / 1000);
+            const days = Math.floor(totalSeconds / 86400);
+            const hours = Math.floor((totalSeconds % 86400) / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = totalSeconds % 60;
+            if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+            if (hours > 0) return `${hours}h ${minutes}m`;
+            if (minutes > 0) return `${minutes}m ${seconds}s`;
+            return `${seconds}s`;
+        }
+
+        function buildConvoStatsHtml(cs) {
+            if (!cs || cs.total_conversations === 0) return '';
+            const leans = cs.avg_participation_leans || {};
+            const sortedLeans = Object.entries(leans).sort((a, b) => b[1] - a[1]);
+            const leansHtml = sortedLeans.map(([sender, pct]) => {
+                const barWidth = Math.round(pct * 100);
+                return `<div class="mb-2">
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="text-gray-700 dark:text-gray-300 truncate max-w-[60%]">${escapeHtml(sender)}</span>
+                        <span class="font-semibold text-gray-900 dark:text-white">${(pct * 100).toFixed(1)}%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                        <div class="bg-indigo-500 h-2 rounded-full" style="width:${barWidth}%"></div>
+                    </div>
+                </div>`;
+            }).join('');
+            const cpd = cs.convos_per_day || {};
+            const totalDays = Object.keys(cpd).length;
+            const avgCpd = totalDays > 0 ? (cs.total_conversations / totalDays).toFixed(2) : '—';
+            return `<div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Conversation Statistics</h3>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5">
+                    <div class="bg-indigo-50 dark:bg-indigo-900/30 rounded-lg p-3">
+                        <p class="text-xs text-indigo-600 dark:text-indigo-300 font-medium uppercase tracking-wide">Conversations</p>
+                        <p class="text-2xl font-bold text-indigo-700 dark:text-indigo-200 mt-1">${cs.total_conversations}</p>
+                    </div>
+                    <div class="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-3">
+                        <p class="text-xs text-blue-600 dark:text-blue-300 font-medium uppercase tracking-wide">Avg Response</p>
+                        <p class="text-2xl font-bold text-blue-700 dark:text-blue-200 mt-1">${formatMs(cs.avg_in_convo_response_time)}</p>
+                    </div>
+                    <div class="bg-purple-50 dark:bg-purple-900/30 rounded-lg p-3">
+                        <p class="text-xs text-purple-600 dark:text-purple-300 font-medium uppercase tracking-wide">Avg Between</p>
+                        <p class="text-2xl font-bold text-purple-700 dark:text-purple-200 mt-1">${formatMs(cs.avg_time_between_convos)}</p>
+                    </div>
+                    <div class="bg-green-50 dark:bg-green-900/30 rounded-lg p-3">
+                        <p class="text-xs text-green-600 dark:text-green-300 font-medium uppercase tracking-wide">Avg Msgs</p>
+                        <p class="text-2xl font-bold text-green-700 dark:text-green-200 mt-1">${(cs.avg_msg_count_per_convo || 0).toFixed(1)}</p>
+                    </div>
+                    <div class="bg-yellow-50 dark:bg-yellow-900/30 rounded-lg p-3">
+                        <p class="text-xs text-yellow-600 dark:text-yellow-300 font-medium uppercase tracking-wide">Avg Duration</p>
+                        <p class="text-2xl font-bold text-yellow-700 dark:text-yellow-200 mt-1">${formatMs(cs.avg_duration_ms_per_convo || 0)}</p>
+                    </div>
+                    <div class="bg-rose-50 dark:bg-rose-900/30 rounded-lg p-3">
+                        <p class="text-xs text-rose-600 dark:text-rose-300 font-medium uppercase tracking-wide">Convos/Active Day</p>
+                        <p class="text-2xl font-bold text-rose-700 dark:text-rose-200 mt-1">${avgCpd}</p>
+                    </div>
+                </div>
+                ${leansHtml ? `<div>
+                    <p class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 uppercase tracking-wide">Participation</p>
+                    ${leansHtml}
+                </div>` : ''}
+            </div>`;
         }
 
         // Public API for extensions

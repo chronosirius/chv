@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory, make_response
 from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 import json
@@ -570,6 +570,15 @@ def inject_template_user_context():
     return {
         'current_username': load_uploader_name(active_code)
     }
+
+@app.route('/sw.js')
+def service_worker():
+    response = make_response(send_from_directory('static', 'sw.js'))
+    response.headers['Content-Type'] = 'application/javascript'
+    response.headers['Service-Worker-Allowed'] = '/'
+    response.headers['Cache-Control'] = 'no-cache'
+    return response
+
 
 @app.route('/')
 def index():

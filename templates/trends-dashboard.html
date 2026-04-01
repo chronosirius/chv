@@ -2039,26 +2039,21 @@
                 try {
                     const resp = await fetch('/api/convo_stats');
                     if (resp.status === 202) return; // still computing
+                    if (!resp.ok) {
+                        // Keep the interval running so the backend can restart the job
+                        showToast('Conversation stats computation failed, retrying…', 'error', 2600);
+                        return;
+                    }
                     if (convoStatsPollInterval) {
                         clearInterval(convoStatsPollInterval);
                         convoStatsPollInterval = null;
                     }
                     loadingEl.style.display = 'none';
-                    if (!resp.ok) {
-                        const err = await resp.json();
-                        summaryEl.innerHTML = `<p class="text-red-500 text-sm">Error: ${escapeHtmlTrends(err.error || 'Unknown error')}</p>`;
-                        return;
-                    }
                     const result = await resp.json();
                     convoStatsTrendData = result.data;
                     renderConvoStatsTrends(convoStatsTrendData);
                 } catch (e) {
-                    if (convoStatsPollInterval) {
-                        clearInterval(convoStatsPollInterval);
-                        convoStatsPollInterval = null;
-                    }
-                    loadingEl.style.display = 'none';
-                    summaryEl.innerHTML = `<p class="text-red-500 text-sm">Network error: ${escapeHtmlTrends(String(e))}</p>`;
+                    showToast(`Network error loading conversation stats: ${escapeHtmlTrends(String(e))}`, 'error', 2600);
                 }
             }
 

@@ -291,6 +291,7 @@ def compute_all_convo_stats(user_code):
     global_convos_per_day: dict = {}
     global_avg_time_between_convos = 0.0
     global_time_between_convos_conversation_count = 0
+    per_chat_convos_per_day: dict = {}
 
     for conv in conversations:
         conv_id = conv['id']
@@ -364,8 +365,16 @@ def compute_all_convo_stats(user_code):
             global_total_duration_ms += avg_duration_ms * total_c
             global_duration_conversation_count += total_c
 
-        for date_str, cnt in thread_agg.get('convos_per_day', {}).items():
+        chat_cpd = thread_agg.get('convos_per_day', {})
+        for date_str, cnt in chat_cpd.items():
             global_convos_per_day[date_str] = global_convos_per_day.get(date_str, 0) + cnt
+
+        # Store per-chat conversation counts for the trends chart
+        if chat_cpd:
+            per_chat_convos_per_day[conv_id] = {
+                'title': conv.get('title', conv_id),
+                'convos_per_day': chat_cpd,
+            }
 
     # Build global summary
     avg_participation = {}
@@ -393,6 +402,7 @@ def compute_all_convo_stats(user_code):
             if global_duration_conversation_count > 0 else 0.0
         ),
         'convos_per_day': global_convos_per_day,
+        'per_chat_convos_per_day': per_chat_convos_per_day,
     }
 
     user_stats_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_convo_stats.json')
@@ -1419,7 +1429,12 @@ def api_convo_stats():
         print(f"[CACHE HIT] Loading convo stats from cache for user {user_code}")
         with open(stats_path, 'r') as f:
             summary = json.load(f)
-        return jsonify({'cached': True, 'data': summary})
+        # Invalidate old caches that pre-date per-chat data
+        if 'per_chat_convos_per_day' not in summary:
+            print(f"[CACHE STALE] Invalidating old convo stats cache for user {user_code}")
+            os.remove(stats_path)
+        else:
+            return jsonify({'cached': True, 'data': summary})
 
     # No cache yet – start background computation if not already running.
     with convo_detection_jobs_lock:

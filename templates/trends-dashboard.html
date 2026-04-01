@@ -363,6 +363,20 @@
                             <option value="week">Weekly</option>
                         </select>
                     </div>
+                    <div class="lg:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Start</label>
+                        <input id="convo-start-date" type="date" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white text-sm" onchange="onConvoPeriodInputChanged()">
+                    </div>
+                    <div class="lg:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">End</label>
+                        <input id="convo-end-date" type="date" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white text-sm" onchange="onConvoPeriodInputChanged()">
+                    </div>
+                    <div class="lg:col-span-1 flex items-end">
+                        <button onclick="applyConvoPeriodMode()" class="w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm">Apply Period</button>
+                    </div>
+                    <div class="lg:col-span-1 flex items-end">
+                        <button onclick="resetConvoChartRange()" class="w-full px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-sm">Reset</button>
+                    </div>
                     <div class="lg:col-span-4">
                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Window</label>
                         <div class="flex items-center gap-2">
@@ -1966,13 +1980,57 @@
             backBtn.classList.toggle('cursor-not-allowed', atMin);
             fwdBtn.classList.toggle('opacity-50', atMax);
             fwdBtn.classList.toggle('cursor-not-allowed', atMax);
-            const daysShown = convoStatsWindowCount * CONVO_WINDOW_DAYS;
+            
+            // Calculate days shown from actual date inputs
+            const startInput = document.getElementById('convo-start-date');
+            const endInput = document.getElementById('convo-end-date');
+            const daysShown = (startInput?.value && endInput?.value) 
+                ? daysBetweenInclusive(startInput.value, endInput.value)
+                : convoStatsWindowCount * CONVO_WINDOW_DAYS;
             label.textContent = `${daysShown}-day window: ${convoStatsWindowCount}/${convoStatsTotalWindows}`;
         }
 
         function changeConvoMonthWindow(step) {
             convoStatsWindowCount = Math.min(convoStatsTotalWindows, Math.max(1, convoStatsWindowCount + step));
+            
+            const { minDate: fullMin, maxDate: fullMax } = getConvoStatsDateRange();
+            if (!fullMin || !fullMax) return;
+            
+            const totalDays = daysBetweenInclusive(fullMin, fullMax);
+            convoStatsTotalWindows = Math.max(1, Math.ceil(totalDays / CONVO_WINDOW_DAYS));
+            convoStatsWindowCount = Math.min(convoStatsTotalWindows, Math.max(1, convoStatsWindowCount));
+            
+            const windowStartDate = addDays(parseLocalDateKey(fullMin), (convoStatsWindowCount - 1) * CONVO_WINDOW_DAYS);
+            const windowEndDate = addDays(windowStartDate, CONVO_WINDOW_DAYS - 1);
+            const maxDate = parseLocalDateKey(fullMax);
+            const clampedStartDate = windowStartDate > maxDate ? maxDate : windowStartDate;
+            const clampedEndDate = windowEndDate > maxDate ? maxDate : windowEndDate;
+            const windowStartKey = formatLocalDateKey(clampedStartDate);
+            const windowEndKey = formatLocalDateKey(clampedEndDate);
+            
+            const startInput = document.getElementById('convo-start-date');
+            const endInput = document.getElementById('convo-end-date');
+            if (startInput) startInput.value = windowStartKey;
+            if (endInput) endInput.value = windowEndKey;
+            
             updateConvoMonthWindowControls();
+            refreshConvoStatsChart();
+        }
+
+        function onConvoPeriodInputChanged() {
+            // Just a placeholder for UI reactivity
+        }
+
+        function applyConvoPeriodMode() {
+            refreshConvoStatsChart();
+        }
+
+        function resetConvoChartRange() {
+            const { minDate: fullMin, maxDate: fullMax } = getConvoStatsDateRange();
+            if (!fullMin || !fullMax) return;
+
+            document.getElementById('convo-start-date').value = fullMin;
+            document.getElementById('convo-end-date').value = fullMax;
             refreshConvoStatsChart();
         }
 
@@ -1984,16 +2042,8 @@
                 return { labels: [], datasets: [], aggregation: options.aggregation, grandTotals: [], totalConvos: 0, chatCounts: [] };
             }
 
-            const { minDate: fullMin, maxDate: fullMax } = getConvoStatsDateRange();
-            let rangeStart = fullMin || '1970-01-01';
-            const rangeEnd = fullMax || '2099-12-31';
-
-            // Restrict to the current window (last N*30 days from maxDate)
-            if (convoStatsWindowCount < convoStatsTotalWindows && fullMax) {
-                const maxDateObj = parseLocalDateKey(fullMax);
-                const startDateObj = addDays(maxDateObj, -(convoStatsWindowCount * CONVO_WINDOW_DAYS - 1));
-                rangeStart = formatLocalDateKey(startDateObj);
-            }
+            const rangeStart = options.startValue || '1970-01-01';
+            const rangeEnd = options.endValue || '2099-12-31';
 
             const bucketMap = {};
             const chatMeta = {};
@@ -2104,7 +2154,10 @@
             const existingChart = Chart.getChart(container.querySelector('canvas'));
             if (existingChart) existingChart.destroy();
 
-            const options = { aggregation: document.getElementById('convo-aggregation')?.value || 'day' };
+            const aggregation = document.getElementById('convo-aggregation')?.value || 'day';
+            const startValue = document.getElementById('convo-start-date')?.value || null;
+            const endValue = document.getElementById('convo-end-date')?.value || null;
+            const options = { aggregation, startValue, endValue };
             const series = buildConvoTrendSeries(options);
 
             updateConvoMonthWindowControls();
@@ -2255,6 +2308,25 @@
                     loadingEl.style.display = 'none';
                     const result = await resp.json();
                     convoStatsTrendData = result.data;
+                    
+                    // Initialize date inputs with first window only (like GC trends)
+                    const { minDate, maxDate } = getConvoStatsDateRange();
+                    if (minDate && maxDate) {
+                        const startInput = document.getElementById('convo-start-date');
+                        const endInput = document.getElementById('convo-end-date');
+                        if (startInput && endInput) {
+                            // Calculate first window (30 days from minDate)
+                            const startDateObj = parseLocalDateKey(minDate);
+                            const windowEndDate = addDays(startDateObj, CONVO_WINDOW_DAYS - 1);
+                            const maxDateObj = parseLocalDateKey(maxDate);
+                            const clampedEndDate = windowEndDate > maxDateObj ? maxDateObj : windowEndDate;
+                            
+                            startInput.value = minDate;
+                            endInput.value = formatLocalDateKey(clampedEndDate);
+                            convoStatsWindowCount = 1;
+                        }
+                    }
+                    
                     refreshConvoStatsChart();
                 } catch (e) {
                     showToast(`Network error loading conversation stats: ${escapeHtmlTrends(String(e))}`, 'error', 2600);

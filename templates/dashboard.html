@@ -37,6 +37,10 @@
     </style>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors">
+    <!-- Offline banner -->
+    <div id="offline-banner" class="hidden fixed top-0 left-0 w-full z-50 bg-amber-500 text-white text-sm text-center py-2 px-4 shadow">
+        ⚡ You are offline. Showing cached data where available.
+    </div>
     <div class="container mx-auto px-4 py-8">
         <div class="flex justify-between items-center mb-8">
             <div>
@@ -47,16 +51,16 @@
                 <a href="/trends" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">
                     Trends
                 </a>
-                <a href="/game" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors">
+                <a id="game-btn" href="/game" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors">
                     Game
                 </a>
                 <button type="button" onclick="toggleTheme()" class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200" aria-label="Toggle theme" title="Toggle theme">
                     <span id="theme-icon">🌙</span>
                 </button>
-                <button onclick="deleteAccount()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
+                <button id="delete-btn" onclick="deleteAccount()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
                     Delete Data
                 </button>
-                <a href="/logout" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">
+                <a id="logout-btn" href="/logout" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">
                     Logout
                 </a>
             </div>
@@ -701,18 +705,26 @@
 
         // Load conversations
         async function loadConversations() {
-            const response = await fetch('/api/conversations');
-            const conversations = await response.json();
-            
             const select = document.getElementById('conversation-select');
-            select.innerHTML = '<option value="">Select a conversation...</option>';
-            
-            conversations.forEach(conv => {
-                const option = document.createElement('option');
-                option.value = conv.id;
-                option.textContent = conv.title;
-                select.appendChild(option);
-            });
+            try {
+                const response = await fetch('/api/conversations');
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    select.innerHTML = data.offline
+                        ? '<option value="">Offline — no cached data</option>'
+                        : '<option value="">Error loading conversations</option>';
+                    return;
+                }
+                select.innerHTML = '<option value="">Select a conversation...</option>';
+                data.forEach(conv => {
+                    const option = document.createElement('option');
+                    option.value = conv.id;
+                    option.textContent = conv.title;
+                    select.appendChild(option);
+                });
+            } catch (err) {
+                select.innerHTML = '<option value="">Failed to load conversations</option>';
+            }
         }
 
         // Load conversation data
@@ -735,9 +747,27 @@
             currentConversationId = conversationId;
             document.getElementById('share-btn').disabled = false;
             document.getElementById('loading-indicator').style.display = 'block';
-            const response = await fetch(`/api/conversation/${conversationId}`);
-            currentData = await response.json();
-            renderDashboard();
+            try {
+                const response = await fetch(`/api/conversation/${conversationId}`);
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({}));
+                    document.getElementById('content-area').innerHTML = `
+                        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                            <p class="text-gray-400 dark:text-gray-500 text-lg">${errData.offline ? 'Offline — this conversation is not cached.' : 'Failed to load conversation.'}</p>
+                        </div>
+                    `;
+                    document.getElementById('loading-indicator').style.display = 'none';
+                    return;
+                }
+                currentData = await response.json();
+                renderDashboard();
+            } catch (err) {
+                document.getElementById('content-area').innerHTML = `
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 text-center">
+                        <p class="text-gray-400 dark:text-gray-500 text-lg">Failed to load conversation.</p>
+                    </div>
+                `;
+            }
             document.getElementById('loading-indicator').style.display = 'none';
         }
 
@@ -1454,7 +1484,12 @@
                 // Tell the SW this tab is authenticated so it can redirect
                 // logged-in users away from the index page.
                 navigator.serviceWorker.ready.then(function(reg) {
-                    if (reg.active) reg.active.postMessage({ type: 'AUTH_STATE', loggedIn: true });
+                    if (reg.active) {
+                        reg.active.postMessage({ type: 'AUTH_STATE', loggedIn: true });
+                        // Trigger a full auth-status refresh so the SW learns the
+                        // stable flag and can start background prefetching if needed.
+                        reg.active.postMessage({ type: 'REFRESH_AUTH' });
+                    }
                 });
             }).catch(function(err) {
                 console.error('Service worker registration failed:', err);
@@ -1475,6 +1510,33 @@
                 window.location.href = '/logout';
             });
         });
+
+        // ── Offline UI ──────────────────────────────────────────────────────
+        var _offlineBanner = document.getElementById('offline-banner');
+        var _gameBtn = document.getElementById('game-btn');
+        var _deleteBtn = document.getElementById('delete-btn');
+        var _logoutBtn = document.getElementById('logout-btn');
+
+        function _setOfflineUI(offline) {
+            if (offline) {
+                _offlineBanner.classList.remove('hidden');
+                // Push content down so banner doesn't overlap it.
+                document.querySelector('.container').style.paddingTop = '2.5rem';
+                if (_gameBtn)   { _gameBtn.classList.add('opacity-50', 'pointer-events-none'); _gameBtn.setAttribute('aria-disabled', 'true'); }
+                if (_deleteBtn) { _deleteBtn.disabled = true; _deleteBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                if (_logoutBtn) { _logoutBtn.classList.add('opacity-50', 'pointer-events-none'); _logoutBtn.setAttribute('aria-disabled', 'true'); }
+            } else {
+                _offlineBanner.classList.add('hidden');
+                document.querySelector('.container').style.paddingTop = '';
+                if (_gameBtn)   { _gameBtn.classList.remove('opacity-50', 'pointer-events-none'); _gameBtn.removeAttribute('aria-disabled'); }
+                if (_deleteBtn) { _deleteBtn.disabled = false; _deleteBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (_logoutBtn) { _logoutBtn.classList.remove('opacity-50', 'pointer-events-none'); _logoutBtn.removeAttribute('aria-disabled'); }
+            }
+        }
+
+        _setOfflineUI(!navigator.onLine);
+        window.addEventListener('offline', function() { _setOfflineUI(true); });
+        window.addEventListener('online',  function() { _setOfflineUI(false); });
     </script>
 </body>
 </html>

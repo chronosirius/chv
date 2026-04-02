@@ -818,7 +818,12 @@ def dashboard():
 
 @app.route('/api/auth-status')
 def api_auth_status():
-    return jsonify({'loggedIn': 'user_code' in session})
+    logged_in = 'user_code' in session
+    stable = False
+    if logged_in:
+        user_path = os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'])
+        stable = os.path.exists(os.path.join(user_path, 'keep.txt'))
+    return jsonify({'loggedIn': logged_in, 'stable': stable})
 
 @app.route('/api/conversations')
 def api_conversations():

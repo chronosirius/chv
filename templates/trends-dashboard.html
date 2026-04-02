@@ -213,6 +213,10 @@
     </style>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors">
+    <!-- Offline banner -->
+    <div id="offline-banner" class="hidden fixed top-0 left-0 w-full z-50 bg-amber-500 text-white text-sm text-center py-2 px-4 shadow">
+        ⚡ You are offline. Showing cached data where available.
+    </div>
     <div class="container mx-auto px-4 py-8">
         <div class="flex justify-between items-center mb-8">
             <div>
@@ -226,10 +230,10 @@
                 <button type="button" onclick="toggleTheme()" class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200" aria-label="Toggle theme" title="Toggle theme">
                     <span id="theme-icon">🌙</span>
                 </button>
-                <button onclick="deleteAccount()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
+                <button id="delete-btn" onclick="deleteAccount()" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
                     Delete Data
                 </button>
-                <a href="/logout" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">
+                <a id="logout-btn" href="/logout" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors">
                     Logout
                 </a>
             </div>
@@ -607,7 +611,9 @@
             }
 
             if (!response.ok) {
-                throw new Error(responseData.error || `Request failed (${response.status})`);
+                const err = new Error(responseData.error || `Request failed (${response.status})`);
+                if (responseData.offline) err.offline = true;
+                throw err;
             }
 
             const gcData = Array.isArray(responseData) ? responseData : responseData.data;
@@ -777,7 +783,7 @@
                     fullRangeMaxDate = metadata.range?.max_date || fullRangeMaxDate;
                     return;
                 } catch (error) {
-                    throw new Error(`Failed to load full data: ${error.message}`);
+                    throw new Error(`Failed to load full data: ${error.offline ? 'offline' : error.message}`);
                 }
             }
         }
@@ -889,6 +895,12 @@
                     isLoadingGroupChats = false;
                     return;
                 } catch (error) {
+                    if (error.offline) {
+                        showToast('Offline — group chat trend data is not cached.', 'error', 5000);
+                        document.getElementById('loading-indicator').style.display = 'none';
+                        isLoadingGroupChats = false;
+                        return;
+                    }
                     const isNetworkError = error instanceof TypeError;
                     if (isNetworkError) {
                         showToast('Network issue while loading trends. Retrying…', 'error', 2200);
@@ -945,7 +957,9 @@
                     }
 
                     if (!response.ok) {
-                        throw new Error(responseData.error || `Request failed (${response.status})`);
+                        const err = new Error(responseData.error || `Request failed (${response.status})`);
+                        if (responseData.offline) err.offline = true;
+                        throw err;
                     }
 
                     uploaderTrendPayload = responseData.data || { uploader_username: null, daily_counts: {} };
@@ -956,6 +970,10 @@
                     refreshUploaderChart();
                     break;
                 } catch (error) {
+                    if (error.offline) {
+                        showToast('Offline — uploader trend data is not cached.', 'error', 5000);
+                        break;
+                    }
                     showToast(`Error loading uploader trend: ${error.message}. Retrying…`, 'error', 2600);
                     await new Promise(resolve => setTimeout(resolve, 1800));
                 }
@@ -2298,6 +2316,16 @@
                     const resp = await fetch('/api/convo_stats');
                     if (resp.status === 202) return; // still computing
                     if (!resp.ok) {
+                        const errData = await resp.json().catch(() => ({}));
+                        if (errData.offline) {
+                            if (convoStatsPollInterval) {
+                                clearInterval(convoStatsPollInterval);
+                                convoStatsPollInterval = null;
+                            }
+                            loadingEl.style.display = 'none';
+                            summaryEl.innerHTML = '<p class="text-gray-400 dark:text-gray-500 text-sm">Offline — conversation stats are not cached.</p>';
+                            return;
+                        }
                         showToast('Conversation stats computation failed, retrying…', 'error', 2600);
                         return;
                     }
@@ -2346,7 +2374,10 @@
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('/sw.js').then(function() {
                 navigator.serviceWorker.ready.then(function(reg) {
-                    if (reg.active) reg.active.postMessage({ type: 'AUTH_STATE', loggedIn: true });
+                    if (reg.active) {
+                        reg.active.postMessage({ type: 'AUTH_STATE', loggedIn: true });
+                        reg.active.postMessage({ type: 'REFRESH_AUTH' });
+                    }
                 });
             }).catch(function(err) {
                 console.error('Service worker registration failed:', err);
@@ -2367,6 +2398,29 @@
                 window.location.href = '/logout';
             });
         });
+
+        // ── Offline UI ──────────────────────────────────────────────────────
+        var _offlineBanner = document.getElementById('offline-banner');
+        var _deleteBtnT = document.getElementById('delete-btn');
+        var _logoutBtnT = document.getElementById('logout-btn');
+
+        function _setOfflineUI(offline) {
+            if (offline) {
+                _offlineBanner.classList.remove('hidden');
+                document.querySelector('.container').style.paddingTop = '2.5rem';
+                if (_deleteBtnT) { _deleteBtnT.disabled = true; _deleteBtnT.classList.add('opacity-50', 'cursor-not-allowed'); }
+                if (_logoutBtnT) { _logoutBtnT.classList.add('opacity-50', 'pointer-events-none'); _logoutBtnT.setAttribute('aria-disabled', 'true'); }
+            } else {
+                _offlineBanner.classList.add('hidden');
+                document.querySelector('.container').style.paddingTop = '';
+                if (_deleteBtnT) { _deleteBtnT.disabled = false; _deleteBtnT.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (_logoutBtnT) { _logoutBtnT.classList.remove('opacity-50', 'pointer-events-none'); _logoutBtnT.removeAttribute('aria-disabled'); }
+            }
+        }
+
+        _setOfflineUI(!navigator.onLine);
+        window.addEventListener('offline', function() { _setOfflineUI(true); });
+        window.addEventListener('online',  function() { _setOfflineUI(false); });
     </script>
 </body>
 </html>

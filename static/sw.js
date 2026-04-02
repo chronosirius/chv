@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const STATIC_CACHE = `chv-static-${CACHE_VERSION}`;
 const API_CACHE = `chv-api-${CACHE_VERSION}`;
 
@@ -14,15 +14,15 @@ const APP_PAGES = [
     '/help',
 ];
 
-// Track whether a user is currently logged in.
-// Updated by direct postMessage from clients and by the BroadcastChannel below.
+// Track whether a user is currently logged in and whether their data is stable.
 let isLoggedIn = false;
+let isStable = false;
 
 // Keep auth state in sync: listen for LOGIN/LOGOUT messages from any client tab.
 const authChannel = new BroadcastChannel('chv_auth');
 authChannel.onmessage = (event) => {
     if (event.data.type === 'LOGIN') isLoggedIn = true;
-    if (event.data.type === 'LOGOUT') isLoggedIn = false;
+    if (event.data.type === 'LOGOUT') { isLoggedIn = false; isStable = false; }
 };
 
 // Accept direct AUTH_STATE messages from client pages (used to sync state on
@@ -35,13 +35,214 @@ self.addEventListener('message', (event) => {
     }
 });
 
-// Fetch auth status from the server and update isLoggedIn.
+// Fetch auth status from the server and update isLoggedIn / isStable.
 function refreshAuthStatus() {
     return fetch('/api/auth-status', { credentials: 'same-origin' })
         .then((res) => res.json())
-        .then((data) => { isLoggedIn = !!data.loggedIn; })
+        .then((data) => {
+            isLoggedIn = !!data.loggedIn;
+            isStable = !!data.stable;
+            if (isStable) backgroundPrefetch().catch(() => {});
+        })
         .catch((err) => console.warn('[SW] Could not refresh auth status:', err));
 }
+
+// ---------------------------------------------------------------------------
+// Background prefetch – pull all stable data into the API cache so the app
+// works fully offline.  Runs after auth-status confirms stable=true.
+// ---------------------------------------------------------------------------
+async function backgroundPrefetch() {
+    if (!isLoggedIn || !isStable) return;
+
+    const cache = await caches.open(API_CACHE);
+
+    // Fetch a URL and store it only when not already cached.
+    async function prefetchIfMissing(url) {
+        const req = new Request(url, { credentials: 'same-origin' });
+        if (await cache.match(req)) return;
+        try {
+            const res = await fetch(req);
+            if (res.ok) await cache.put(req, res.clone()).catch(() => {});
+        } catch (err) {
+            console.warn(`[SW] Prefetch failed: ${url}`, err);
+        }
+    }
+
+    // Conversations list + each individual conversation.
+    const convoReq = new Request('/api/conversations', { credentials: 'same-origin' });
+    let conversations = null;
+    const existingConvos = await cache.match(convoReq);
+    if (existingConvos) {
+        conversations = await existingConvos.clone().json().catch(() => null);
+    } else {
+        try {
+            const res = await fetch(convoReq);
+            if (res.ok) {
+                const clone = res.clone();
+                await cache.put(convoReq, res).catch(() => {});
+                conversations = await clone.json().catch(() => null);
+            }
+        } catch (_) { /* offline */ }
+    }
+
+    if (Array.isArray(conversations)) {
+        for (let i = 0; i < conversations.length; i += 5) {
+            await Promise.all(
+                conversations.slice(i, i + 5).map((c) =>
+                    c.id ? prefetchIfMissing(`/api/conversation/${c.id}`) : Promise.resolve()
+                )
+            );
+        }
+    }
+
+    // Full trend data and stats.
+    await prefetchIfMissing('/api/group_chat_trends?full=1');
+    await prefetchIfMissing('/api/uploader_message_trends?full=1');
+    await prefetchIfMissing('/api/convo_stats');
+
+    console.log('[SW] Background prefetch complete.');
+}
+
+// ---------------------------------------------------------------------------
+// Offline date-slicing helpers – adapted from app.py's filtering logic.
+// Serves a months=N partial request from the cached full=1 response when
+// the network is unavailable.
+// ---------------------------------------------------------------------------
+
+// Slice group-chat trend data to the first `months` month-buckets.
+// Mirrors the Python logic: sorted_month_keys[:months_loaded].
+function sliceGroupChatTrends(fullData, months, url) {
+    const allMonthKeys = fullData.month_keys || [];
+    const groupChatIdsParam = url.searchParams.get('group_chat_ids');
+    const selectedIds = groupChatIdsParam
+        ? new Set(groupChatIdsParam.split(','))
+        : null;
+
+    const monthsLoaded = Math.min(months, allMonthKeys.length);
+    const allowedMonths = new Set(allMonthKeys.slice(0, monthsLoaded));
+
+    let responseData = (fullData.data || []).slice();
+
+    if (selectedIds && selectedIds.size > 0) {
+        responseData = responseData.filter((gc) => selectedIds.has(String(gc.id)));
+    }
+
+    responseData = responseData
+        .map((gc) => {
+            const filtered = {};
+            for (const [k, v] of Object.entries(gc.daily_counts || {})) {
+                if (k.length >= 7 && allowedMonths.has(k.slice(0, 7))) filtered[k] = v;
+            }
+            return { ...gc, daily_counts: filtered };
+        })
+        .filter((gc) => Object.keys(gc.daily_counts).length > 0);
+
+    const loadedDates = responseData.flatMap((gc) => Object.keys(gc.daily_counts));
+    const loadedMin = loadedDates.length ? loadedDates.reduce((a, b) => (a < b ? a : b)) : null;
+    const loadedMax = loadedDates.length ? loadedDates.reduce((a, b) => (a > b ? a : b)) : null;
+
+    return new Response(
+        JSON.stringify({
+            data: responseData,
+            cached: true,
+            partial: true,
+            months_loaded: monthsLoaded,
+            total_months: allMonthKeys.length,
+            month_keys: allMonthKeys,
+            // precomputed_trends omitted; frontend falls back to movingAverage()
+            precomputed_trends: null,
+            range: fullData.range,
+            loaded_range: { min_date: loadedMin, max_date: loadedMax },
+            sw_sliced: true,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+}
+
+// Slice uploader trend data to the first `months` month-buckets.
+function sliceUploaderTrends(fullData, months) {
+    const allMonthKeys = fullData.month_keys || [];
+    const monthsLoaded = Math.min(months, allMonthKeys.length);
+    const allowedMonths = new Set(allMonthKeys.slice(0, monthsLoaded));
+
+    function filterCounts(counts) {
+        const out = {};
+        for (const [k, v] of Object.entries(counts || {})) {
+            if (k.length >= 7 && allowedMonths.has(k.slice(0, 7))) out[k] = v;
+        }
+        return out;
+    }
+
+    const inner = fullData.data || {};
+    const sentFiltered = filterCounts(inner.sent_daily_counts);
+    const receivedFiltered = filterCounts(inner.received_daily_counts);
+
+    const loadedDates = [...Object.keys(sentFiltered), ...Object.keys(receivedFiltered)];
+    const loadedMin = loadedDates.length ? loadedDates.reduce((a, b) => (a < b ? a : b)) : null;
+    const loadedMax = loadedDates.length ? loadedDates.reduce((a, b) => (a > b ? a : b)) : null;
+
+    return new Response(
+        JSON.stringify({
+            data: {
+                uploader_username: inner.uploader_username,
+                sent_daily_counts: sentFiltered,
+                received_daily_counts: receivedFiltered,
+            },
+            cached: true,
+            partial: true,
+            months_loaded: monthsLoaded,
+            total_months: allMonthKeys.length,
+            month_keys: allMonthKeys,
+            precomputed_trends: null,
+            range: fullData.range,
+            loaded_range: { min_date: loadedMin, max_date: loadedMax },
+            sw_sliced: true,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+}
+
+// Try to satisfy a partial (months=N) trend request from the cached full=1
+// response.  Returns a Response on success, or null if not possible.
+async function tryOfflineTrendSlice(cache, url) {
+    const pathname = url.pathname;
+    if (
+        pathname !== '/api/group_chat_trends' &&
+        pathname !== '/api/uploader_message_trends'
+    ) {
+        return null;
+    }
+
+    // Only useful for partial (months=N) requests; full=1 cache misses are real.
+    if (url.searchParams.get('full')) return null;
+
+    const fullUrl = new URL(url.href);
+    fullUrl.search = '?full=1';
+    const cached = await cache.match(fullUrl.toString());
+    if (!cached) return null;
+
+    const fullData = await cached.json().catch(() => null);
+    if (!fullData) return null;
+
+    const months = Math.max(1, parseInt(url.searchParams.get('months') || '1', 10));
+
+    if (pathname === '/api/group_chat_trends') {
+        return sliceGroupChatTrends(fullData, months, url);
+    }
+    return sliceUploaderTrends(fullData, months);
+}
+
+// Offline error response for API endpoints where no cached data is available.
+function offlineApiResponse() {
+    return new Response(
+        JSON.stringify({ error: 'You are offline and this data is not cached.', offline: true }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Service worker lifecycle
+// ---------------------------------------------------------------------------
 
 self.addEventListener('install', (event) => {
     event.waitUntil(
@@ -79,10 +280,11 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // On logout: clear the static cache so stale user-specific pages are not
+    // On logout: clear the caches so stale user-specific data is not
     // served to the next user, then pass the request through to the server.
     if (url.pathname === '/logout') {
         isLoggedIn = false;
+        isStable = false;
         event.respondWith(
             Promise.all([
                 caches.delete(STATIC_CACHE).catch(() => {}),
@@ -110,12 +312,12 @@ self.addEventListener('fetch', (event) => {
                                 if (response.ok) cache.put(request, response.clone()).catch((err) => console.warn('[SW] API cache put failed:', err));
                                 return response;
                             })
-                            .catch(() =>
-                                new Response('API unavailable', {
-                                    status: 503,
-                                    headers: { 'Content-Type': 'text/plain' },
-                                })
-                            );
+                            .catch(async () => {
+                                // Network failed – try date-slicing from full cached data.
+                                const sliced = await tryOfflineTrendSlice(cache, url);
+                                if (sliced) return sliced;
+                                return offlineApiResponse();
+                            });
                     })
                 )
                 .catch(() => fetch(request))
@@ -123,7 +325,7 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Never cache non-GET requests, uploads, or login
+    // Never cache non-GET requests, uploads, or login.
     if (
         request.method !== 'GET' ||
         url.pathname.startsWith('/upload/') ||
@@ -135,7 +337,7 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Game is server-generated – never cache it
+    // Game is server-generated – never cache it.
     if (url.pathname === '/game' || url.pathname.startsWith('/game/')) {
         event.respondWith(
             fetch(request).catch(() =>
@@ -148,7 +350,7 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Redirect logged-in users away from the index page to the dashboard
+    // Redirect logged-in users away from the index page to the dashboard.
     if (url.pathname === '/' && isLoggedIn) {
         event.respondWith(Response.redirect('/dashboard', 302));
         return;

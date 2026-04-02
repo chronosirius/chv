@@ -21,12 +21,22 @@ authChannel.onmessage = (event) => {
 };
 
 // Accept direct AUTH_STATE messages from client pages (used to sync state on
-// SW restart, before any broadcast has been sent).
+// SW restart, before any broadcast has been sent). Also handle explicit refresh.
 self.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'AUTH_STATE') {
         isLoggedIn = !!event.data.loggedIn;
+    } else if (event.data && event.data.type === 'REFRESH_AUTH') {
+        refreshAuthStatus();
     }
 });
+
+// Fetch auth status from the server and update isLoggedIn.
+function refreshAuthStatus() {
+    return fetch('/api/auth-status', { credentials: 'same-origin' })
+        .then((res) => res.json())
+        .then((data) => { isLoggedIn = !!data.loggedIn; })
+        .catch((err) => console.warn('[SW] Could not refresh auth status:', err));
+}
 
 self.addEventListener('install', (event) => {
     event.waitUntil(
@@ -49,6 +59,7 @@ self.addEventListener('activate', (event) => {
             )
             .catch((err) => console.warn('[SW] Cache cleanup failed:', err))
             .then(() => self.clients.claim())
+            .then(() => refreshAuthStatus())
     );
 });
 

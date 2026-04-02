@@ -133,6 +133,16 @@
         // Theme management
         let pendingUploadCode = null;
 
+        // Auth broadcast channel – declared early so the login form handler can use it
+        var _authChannel = new BroadcastChannel('chv_auth');
+        _authChannel.onmessage = function(e) {
+            if (e.data.type === 'LOGOUT') {
+                window.location.href = '/';
+            } else if (e.data.type === 'LOGIN') {
+                window.location.href = '/dashboard';
+            }
+        };
+
         function setThemeIcon() {
             const icon = document.getElementById('theme-icon');
             if (!icon) return;
@@ -371,15 +381,6 @@
                 console.error('Service worker registration failed:', err);
             });
         }
-        // Keep auth state in sync across browser tabs
-        var _authChannel = new BroadcastChannel('chv_auth');
-        _authChannel.onmessage = function(e) {
-            if (e.data.type === 'LOGOUT') {
-                window.location.href = '/';
-            } else if (e.data.type === 'LOGIN') {
-                window.location.href = '/dashboard';
-            }
-        };
     </script>
 </body>
 </html>

@@ -816,6 +816,10 @@ def dashboard():
         return redirect(url_for('index'))
     return render_template('dashboard.html')
 
+@app.route('/api/auth-status')
+def api_auth_status():
+    return jsonify({'loggedIn': 'user_code' in session})
+
 @app.route('/api/conversations')
 def api_conversations():
     if 'user_code' not in session:

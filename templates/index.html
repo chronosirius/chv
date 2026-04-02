@@ -349,8 +349,7 @@
                 const data = await response.json();
                 
                 if (response.ok) {
-                    const authChannel = new BroadcastChannel('chv_auth');
-                    authChannel.postMessage({ type: 'LOGIN' });
+                    _authChannel.postMessage({ type: 'LOGIN' });
                     window.location.href = '/dashboard';
                 } else {
                     status.innerHTML = `<span class="text-red-600 dark:text-red-400">Error: ${data.error}</span>`;
@@ -362,7 +361,13 @@
     </script>
     <script>
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(function(err) {
+            navigator.serviceWorker.register('/sw.js').then(function() {
+                // Tell the SW the user is not logged in so it won't redirect
+                // future navigations to '/' while this tab has the login page open.
+                navigator.serviceWorker.ready.then(function(reg) {
+                    if (reg.active) reg.active.postMessage({ type: 'AUTH_STATE', loggedIn: false });
+                });
+            }).catch(function(err) {
                 console.error('Service worker registration failed:', err);
             });
         }

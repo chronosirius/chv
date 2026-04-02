@@ -676,5 +676,31 @@
                 setResult(err.message || 'Failed to initialize game', false);
             });
     </script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').then(function() {
+                navigator.serviceWorker.ready.then(function(reg) {
+                    if (reg.active) reg.active.postMessage({ type: 'AUTH_STATE', loggedIn: true });
+                });
+            }).catch(function(err) {
+                console.error('Service worker registration failed:', err);
+            });
+        }
+        // Keep auth state in sync across browser tabs
+        var _authChannel = new BroadcastChannel('chv_auth');
+        _authChannel.onmessage = function(e) {
+            if (e.data.type === 'LOGOUT') {
+                window.location.href = '/';
+            }
+        };
+        // Broadcast LOGOUT to other tabs before navigating away
+        document.querySelectorAll('a[href="/logout"]').forEach(function(link) {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                _authChannel.postMessage({ type: 'LOGOUT' });
+                window.location.href = '/logout';
+            });
+        });
+    </script>
 </body>
 </html>

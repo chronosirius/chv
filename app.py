@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_from_directory, make_response
 from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 import json
@@ -571,6 +571,15 @@ def inject_template_user_context():
         'current_username': load_uploader_name(active_code)
     }
 
+@app.route('/sw.js')
+def service_worker():
+    response = make_response(send_from_directory('static', 'sw.js'))
+    response.headers['Content-Type'] = 'application/javascript'
+    response.headers['Service-Worker-Allowed'] = '/'
+    response.headers['Cache-Control'] = 'no-cache'
+    return response
+
+
 @app.route('/')
 def index():
     cleanup_old_data()
@@ -806,6 +815,15 @@ def dashboard():
     if 'user_code' not in session:
         return redirect(url_for('index'))
     return render_template('dashboard.html')
+
+@app.route('/api/auth-status')
+def api_auth_status():
+    logged_in = 'user_code' in session
+    stable = False
+    if logged_in:
+        user_path = os.path.join(app.config['UPLOAD_FOLDER'], session['user_code'])
+        stable = os.path.exists(os.path.join(user_path, 'keep.txt'))
+    return jsonify({'loggedIn': logged_in, 'stable': stable})
 
 @app.route('/api/conversations')
 def api_conversations():
@@ -1471,6 +1489,10 @@ def api_convo_stats():
 def logout():
     session.clear()
     return redirect(url_for('index'))
+
+@app.route('/offline')
+def offline_page():
+    return render_template('offline.html'), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=7000, debug=True, threaded=True)

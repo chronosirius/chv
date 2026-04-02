@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const STATIC_CACHE = `chv-static-${CACHE_VERSION}`;
 const API_CACHE = `chv-api-${CACHE_VERSION}`;
 
@@ -12,6 +12,7 @@ const UNCACHEABLE_API_PATHS = [
 const APP_PAGES = [
     '/',
     '/help',
+    '/offline',
 ];
 
 // Track whether a user is currently logged in and whether their data is stable.
@@ -264,6 +265,22 @@ function offlineApiResponse() {
     );
 }
 
+// Offline page response for navigation requests that require a live server.
+// Returns the pre-cached /offline page, or a minimal fallback if not yet cached.
+async function offlinePageResponse() {
+    const cache = await caches.open(STATIC_CACHE).catch(() => null);
+    if (cache) {
+        const cached = await cache.match('/offline').catch(() => null);
+        if (cached) return cached;
+    }
+    return new Response(
+        '<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:3rem">' +
+        '<h1>You\'re offline</h1><p>This feature requires an internet connection.</p>' +
+        '<a href="/dashboard">← Back to Dashboard</a></body></html>',
+        { status: 200, headers: { 'Content-Type': 'text/html' } }
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Service worker lifecycle
 // ---------------------------------------------------------------------------
@@ -315,7 +332,7 @@ self.addEventListener('fetch', (event) => {
                 caches.delete(API_CACHE).catch(() => {}),
             ])
                 .then(() => fetch(request))
-                .catch(() => new Response('Logout failed', { status: 503 }))
+                .catch(() => offlinePageResponse())
         );
         return;
     }
@@ -364,12 +381,7 @@ self.addEventListener('fetch', (event) => {
     // Game is server-generated – never cache it.
     if (url.pathname === '/game' || url.pathname.startsWith('/game/')) {
         event.respondWith(
-            fetch(request).catch(() =>
-                new Response('Offline – game not available', {
-                    status: 503,
-                    headers: { 'Content-Type': 'text/plain' },
-                })
-            )
+            fetch(request).catch(() => offlinePageResponse())
         );
         return;
     }
@@ -392,21 +404,11 @@ self.addEventListener('fetch', (event) => {
                             if (response.ok) cache.put(request, response.clone()).catch((err) => console.warn('[SW] Static cache put failed:', err));
                             return response;
                         })
-                        .catch(() =>
-                            new Response('Offline – page not available', {
-                                status: 503,
-                                headers: { 'Content-Type': 'text/plain' },
-                            })
-                        );
+                        .catch(() => offlinePageResponse());
                 })
             )
             .catch(() =>
-                fetch(request).catch(() =>
-                    new Response('Offline – page not available', {
-                        status: 503,
-                        headers: { 'Content-Type': 'text/plain' },
-                    })
-                )
+                fetch(request).catch(() => offlinePageResponse())
             )
     );
 });

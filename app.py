@@ -1490,5 +1490,9 @@ def logout():
     session.clear()
     return redirect(url_for('index'))
 
+@app.route('/offline')
+def offline_page():
+    return render_template('offline.html'), 200
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=7000, debug=True, threaded=True)

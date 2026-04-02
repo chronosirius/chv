@@ -1,12 +1,10 @@
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const STATIC_CACHE = `chv-static-${CACHE_VERSION}`;
 const API_CACHE = `chv-api-${CACHE_VERSION}`;
 
-// API paths that should be served cache-first (dashboard conversations & trends).
-const CACHEABLE_API_PATHS = [
-    '/api/group_chat_trends',
-    '/api/uploader_message_trends',
-    '/api/convo_stats',
+// API GET endpoints that must always hit the network (dynamic / auth-sensitive).
+const UNCACHEABLE_API_PATHS = [
+    '/api/auth-status',
 ];
 
 // App pages to pre-cache on install.
@@ -96,11 +94,11 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Cache-first for dashboard conversation and trends API endpoints.
+    // Cache-first for all GET /api/ endpoints except auth-status (dynamic).
     if (
         request.method === 'GET' &&
-        (url.pathname.startsWith('/api/conversation/') ||
-            CACHEABLE_API_PATHS.includes(url.pathname))
+        url.pathname.startsWith('/api/') &&
+        !UNCACHEABLE_API_PATHS.includes(url.pathname)
     ) {
         event.respondWith(
             caches.open(API_CACHE)
@@ -125,10 +123,9 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Never cache non-GET requests, other API calls, uploads, or login
+    // Never cache non-GET requests, uploads, or login
     if (
         request.method !== 'GET' ||
-        url.pathname.startsWith('/api/') ||
         url.pathname.startsWith('/upload/') ||
         url.pathname === '/login'
     ) {

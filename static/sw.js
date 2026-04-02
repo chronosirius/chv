@@ -47,6 +47,9 @@ function refreshAuthStatus() {
         .catch((err) => console.warn('[SW] Could not refresh auth status:', err));
 }
 
+// BroadcastChannel for prefetch progress (separate from auth channel).
+const prefetchChannel = new BroadcastChannel('chv_prefetch');
+
 // ---------------------------------------------------------------------------
 // Background prefetch – pull all stable data into the API cache so the app
 // works fully offline.  Runs after auth-status confirms stable=true.
@@ -56,19 +59,7 @@ async function backgroundPrefetch() {
 
     const cache = await caches.open(API_CACHE);
 
-    // Fetch a URL and store it only when not already cached.
-    async function prefetchIfMissing(url) {
-        const req = new Request(url, { credentials: 'same-origin' });
-        if (await cache.match(req)) return;
-        try {
-            const res = await fetch(req);
-            if (res.ok) await cache.put(req, res.clone()).catch(() => {});
-        } catch (err) {
-            console.warn(`[SW] Prefetch failed: ${url}`, err);
-        }
-    }
-
-    // Conversations list + each individual conversation.
+    // ── Step 1: discover conversations list ────────────────────────────────
     const convoReq = new Request('/api/conversations', { credentials: 'same-origin' });
     let conversations = null;
     const existingConvos = await cache.match(convoReq);
@@ -85,21 +76,54 @@ async function backgroundPrefetch() {
         } catch (_) { /* offline */ }
     }
 
+    const convCount = Array.isArray(conversations) ? conversations.length : 0;
+    // total = individual convos + group_chat_trends + uploader_trends + convo_stats
+    const total = convCount + 3;
+
+    prefetchChannel.postMessage({ type: 'PREFETCH_START', total });
+
+    let done = 0;
+
+    function progress(label) {
+        done += 1;
+        prefetchChannel.postMessage({ type: 'PREFETCH_PROGRESS', done, total, label });
+    }
+
+    // Fetch a URL and store it only when not already cached.
+    async function prefetchIfMissing(url, label) {
+        const req = new Request(url, { credentials: 'same-origin' });
+        if (await cache.match(req)) {
+            progress(label);
+            return;
+        }
+        try {
+            const res = await fetch(req);
+            if (res.ok) await cache.put(req, res.clone()).catch(() => {});
+        } catch (err) {
+            console.warn(`[SW] Prefetch failed: ${url}`, err);
+        }
+        progress(label);
+    }
+
+    // ── Step 2: cache each individual conversation ─────────────────────────
     if (Array.isArray(conversations)) {
         for (let i = 0; i < conversations.length; i += 5) {
             await Promise.all(
                 conversations.slice(i, i + 5).map((c) =>
-                    c.id ? prefetchIfMissing(`/api/conversation/${c.id}`) : Promise.resolve()
+                    c.id
+                        ? prefetchIfMissing(`/api/conversation/${c.id}`, c.title || `Conversation ${c.id}`)
+                        : Promise.resolve()
                 )
             );
         }
     }
 
-    // Full trend data and stats.
-    await prefetchIfMissing('/api/group_chat_trends?full=1');
-    await prefetchIfMissing('/api/uploader_message_trends?full=1');
-    await prefetchIfMissing('/api/convo_stats');
+    // ── Step 3: trends + stats ─────────────────────────────────────────────
+    await prefetchIfMissing('/api/group_chat_trends?full=1', 'Group chat trends');
+    await prefetchIfMissing('/api/uploader_message_trends?full=1', 'Uploader trends');
+    await prefetchIfMissing('/api/convo_stats', 'Conversation stats');
 
+    prefetchChannel.postMessage({ type: 'PREFETCH_DONE', total });
     console.log('[SW] Background prefetch complete.');
 }
 

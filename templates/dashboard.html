@@ -34,12 +34,90 @@
       transform:  translateX(400%) scaleX(1);
     }
   }
+
+  .toast-container {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      pointer-events: none;
+  }
+
+  .toast {
+      pointer-events: auto;
+      min-width: 220px;
+      max-width: 320px;
+      border-radius: 0.5rem;
+      padding: 0.625rem 0.75rem;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.15);
+      font-size: 0.875rem;
+      line-height: 1.25rem;
+      border: 1px solid transparent;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: opacity 180ms ease, transform 180ms ease;
+  }
+
+  .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+  }
+
+  .toast-error {
+      background: #fef2f2;
+      border-color: #fecaca;
+      color: #991b1b;
+  }
+
+  .dark .toast-error {
+      background: #3f1d1d;
+      border-color: #7f1d1d;
+      color: #fecaca;
+  }
+
+  .toast-info {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+      color: #1e3a8a;
+  }
+
+  .dark .toast-info {
+      background: #172554;
+      border-color: #1d4ed8;
+      color: #bfdbfe;
+  }
+
+  .toast-success {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+      color: #166534;
+  }
+
+  .dark .toast-success {
+      background: #052e16;
+      border-color: #166534;
+      color: #bbf7d0;
+  }
     </style>
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 min-h-screen transition-colors">
     <!-- Offline banner -->
     <div id="offline-banner" class="hidden fixed top-0 left-0 w-full z-50 bg-amber-500 text-white text-sm text-center py-2 px-4 shadow">
         ⚡ You are offline. Showing cached data where available.
+    </div>
+    <!-- Toast container -->
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+    <!-- Prefetch progress widget (bottom-left corner) -->
+    <div id="prefetch-widget" class="hidden fixed bottom-4 left-4 z-40 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 w-72 text-sm text-gray-800 dark:text-gray-200">
+        <p class="font-medium mb-1">📦 Syncing data for offline use…</p>
+        <p id="prefetch-label" class="text-xs text-gray-500 dark:text-gray-400 mb-2 truncate"></p>
+        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
+            <div id="prefetch-bar" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width:0%"></div>
+        </div>
+        <p id="prefetch-count" class="text-xs text-gray-400 dark:text-gray-500 mt-1 text-right"></p>
     </div>
     <div class="container mx-auto px-4 py-8">
         <div class="flex justify-between items-center mb-8">
@@ -1537,6 +1615,53 @@
         _setOfflineUI(!navigator.onLine);
         window.addEventListener('offline', function() { _setOfflineUI(true); });
         window.addEventListener('online',  function() { _setOfflineUI(false); });
+
+        // ── Toast ────────────────────────────────────────────────────────────
+        function showToast(message, variant, durationMs) {
+            variant = variant || 'info';
+            durationMs = durationMs || 2800;
+            var container = document.getElementById('toast-container');
+            if (!container) return;
+            var toast = document.createElement('div');
+            toast.className = 'toast toast-' + variant;
+            toast.textContent = message;
+            container.appendChild(toast);
+            requestAnimationFrame(function() { toast.classList.add('show'); });
+            setTimeout(function() {
+                toast.classList.remove('show');
+                setTimeout(function() { toast.remove(); }, 200);
+            }, durationMs);
+        }
+
+        // ── Prefetch progress ────────────────────────────────────────────────
+        (function() {
+            var widget   = document.getElementById('prefetch-widget');
+            var bar      = document.getElementById('prefetch-bar');
+            var labelEl  = document.getElementById('prefetch-label');
+            var countEl  = document.getElementById('prefetch-count');
+            if (!widget) return;
+
+            var prefetchChannel = new BroadcastChannel('chv_prefetch');
+            prefetchChannel.onmessage = function(e) {
+                var msg = e.data;
+                if (msg.type === 'PREFETCH_START') {
+                    widget.classList.remove('hidden');
+                    bar.style.width = '0%';
+                    labelEl.textContent = '';
+                    countEl.textContent = '0 / ' + msg.total;
+                } else if (msg.type === 'PREFETCH_PROGRESS') {
+                    var pct = msg.total > 0 ? Math.round((msg.done / msg.total) * 100) : 0;
+                    bar.style.width = pct + '%';
+                    labelEl.textContent = msg.label || '';
+                    countEl.textContent = msg.done + ' / ' + msg.total;
+                } else if (msg.type === 'PREFETCH_DONE') {
+                    bar.style.width = '100%';
+                    countEl.textContent = msg.total + ' / ' + msg.total;
+                    setTimeout(function() { widget.classList.add('hidden'); }, 1200);
+                    showToast('✅ All data cached for offline use.', 'success', 4000);
+                }
+            };
+        }());
     </script>
 </body>
 </html>

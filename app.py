@@ -930,13 +930,18 @@ def api_conversation(conversation_id):
     
     avg_gap = total_gaps / gap_count if gap_count > 0 else 0
     
-    # Calculate response times
+    # Calculate response times (overall and per sender)
     max_response = {'time': 0, 'msg1': None, 'msg2': None}
     min_response = {'time': float('inf'), 'msg1': None, 'msg2': None}
     total_responses = 0
     response_count = 0
     prev_response = messages[0]
-    
+
+    per_sender_total_responses = {}
+    per_sender_response_count = {}
+    per_sender_max_response = {}
+    per_sender_min_response = {}
+
     for i in range(1, len(messages)):
         if messages[i]['sender_name'] != prev_response['sender_name']:
             response_time = messages[i]['timestamp_ms'] - prev_response['timestamp_ms']
@@ -947,10 +952,30 @@ def api_conversation(conversation_id):
                 max_response = {'time': response_time, 'msg1': prev_response, 'msg2': messages[i]}
             if response_time < min_response['time']:
                 min_response = {'time': response_time, 'msg1': prev_response, 'msg2': messages[i]}
+
+            responder = messages[i]['sender_name']
+            per_sender_total_responses[responder] = per_sender_total_responses.get(responder, 0) + response_time
+            per_sender_response_count[responder] = per_sender_response_count.get(responder, 0) + 1
+            if response_time > per_sender_max_response.get(responder, {'time': 0})['time']:
+                per_sender_max_response[responder] = {'time': response_time, 'msg1': prev_response, 'msg2': messages[i]}
+            if response_time < per_sender_min_response.get(responder, {'time': float('inf')})['time']:
+                per_sender_min_response[responder] = {'time': response_time, 'msg1': prev_response, 'msg2': messages[i]}
             
             prev_response = messages[i]
     
     avg_response = total_responses / response_count if response_count > 0 else 0
+
+    responses_by_sender = {}
+    for sender in per_sender_response_count:
+        s_min = per_sender_min_response.get(sender, {'time': 'Infinity', 'msg1': None, 'msg2': None})
+        if s_min['time'] == float('inf'):
+            s_min = {'time': 'Infinity', 'msg1': None, 'msg2': None}
+        responses_by_sender[sender] = {
+            'avg': per_sender_total_responses[sender] / per_sender_response_count[sender],
+            'count': per_sender_response_count[sender],
+            'max': per_sender_max_response.get(sender, {'time': 0, 'msg1': None, 'msg2': None}),
+            'min': s_min,
+        }
     
     if min_gap['time'] == float('inf'):
         min_gap = {'time': 'Infinity', 'msg1': None, 'msg2': None}
@@ -975,7 +1000,8 @@ def api_conversation(conversation_id):
         'responses': {
             'avg': avg_response,
             'max': max_response,
-            'min': min_response
+            'min': min_response,
+            'by_sender': responses_by_sender
         },
         'average_message_length': {
             "overall": sum(len(m.get('content', '')) for m in messages) / total_messages if total_messages > 0 else 0,

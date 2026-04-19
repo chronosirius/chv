@@ -965,22 +965,23 @@ def api_conversation(conversation_id):
     
     avg_response = total_responses / response_count if response_count > 0 else 0
 
+    def _normalize_min(entry):
+        if entry['time'] == float('inf'):
+            return {'time': 'Infinity', 'msg1': None, 'msg2': None}
+        return entry
+
     responses_by_sender = {}
     for sender in per_sender_response_count:
-        s_min = per_sender_min_response.get(sender, {'time': 'Infinity', 'msg1': None, 'msg2': None})
-        if s_min['time'] == float('inf'):
-            s_min = {'time': 'Infinity', 'msg1': None, 'msg2': None}
         responses_by_sender[sender] = {
             'avg': per_sender_total_responses[sender] / per_sender_response_count[sender],
             'count': per_sender_response_count[sender],
-            'max': per_sender_max_response.get(sender, {'time': 0, 'msg1': None, 'msg2': None}),
-            'min': s_min,
+            'max': per_sender_max_response[sender],
+            'min': _normalize_min(per_sender_min_response[sender]),
         }
     
     if min_gap['time'] == float('inf'):
         min_gap = {'time': 'Infinity', 'msg1': None, 'msg2': None}
-    if min_response['time'] == float('inf'):
-        min_response = {'time': 'Infinity', 'msg1': None, 'msg2': None}
+    min_response = _normalize_min(min_response)
     d = {
         'conversation': conv_info,
         'total_messages': total_messages,

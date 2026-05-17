@@ -1200,10 +1200,10 @@
             }
 
             if (!sentTrend) {
-                sentTrend = movingAverage(sentCounts, trendWindow);
+                sentTrend = movingAverage(sentCounts, movingAverageWindow);
             }
             if (!receivedTrend) {
-                receivedTrend = movingAverage(receivedCounts, trendWindow);
+                receivedTrend = movingAverage(receivedCounts, movingAverageWindow);
             }
 
             const totalSent = sentCounts.reduce((acc, value) => acc + value, 0);
@@ -1508,7 +1508,7 @@
                 chatsCounts.push(Number(chatsBucketMap[key] || 0));
             });
 
-            const trendWindow = options.aggregation === 'week' ? 4 : 7;
+            const movingAverageWindow = options.aggregation === 'week' ? 4 : 7;
             let peopleTrend = null;
             let chatsTrend = null;
 

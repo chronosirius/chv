@@ -269,6 +269,13 @@
                     Sent/Received Trends
                 </button>
                 <button
+                    id="tab-people-talked"
+                    class="px-4 py-3 text-lg font-semibold text-gray-600 dark:text-gray-400 border-b-2 border-gray-300 dark:border-gray-600"
+                    onclick="switchTab('people-talked')"
+                >
+                    People/Chats Activity
+                </button>
+                <button
                     id="tab-convo-stats"
                     class="px-4 py-3 text-lg font-semibold text-gray-600 dark:text-gray-400 border-b-2 border-gray-300 dark:border-gray-600"
                     onclick="switchTab('convo-stats')"
@@ -368,6 +375,44 @@
             </div>
         </div>
 
+        <div id="section-people-talked" class="trend-section" style="display: none;">
+            <div class="mb-6 space-y-4">
+                <div class="grid grid-cols-1 lg:grid-cols-8 gap-3">
+                    <div class="lg:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Granularity</label>
+                        <select id="people-talked-aggregation" onchange="refreshPeopleTalkedChart()" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white text-sm">
+                            <option value="day">Daily</option>
+                            <option value="week">Weekly</option>
+                        </select>
+                    </div>
+                    <div class="lg:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Start</label>
+                        <input id="people-talked-start-date" type="date" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white text-sm" onchange="refreshPeopleTalkedChart()">
+                    </div>
+                    <div class="lg:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">End</label>
+                        <input id="people-talked-end-date" type="date" class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 dark:text-white text-sm" onchange="refreshPeopleTalkedChart()">
+                    </div>
+                    <div class="lg:col-span-2 flex items-end">
+                        <button onclick="resetPeopleTalkedChartRange()" class="w-full px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-sm">Reset</button>
+                    </div>
+                </div>
+                <div class="w-full" id="people-talked-loading-indicator" style="display: none;">
+                    <div class="relative h-3 rounded-lg w-full overflow-hidden light:bg-blue-100 dark:bg-blue-900">
+                        <div class="progress-bar-value absolute h-full bg-blue-500"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">People Talked To vs Active Chats</h3>
+                <div class="relative h-96 mb-6" id="people-talked-chart-container" style="position: relative;">
+                    <canvas id="people-talked-chart"></canvas>
+                </div>
+                <div id="people-talked-summary" class="mt-4"></div>
+            </div>
+        </div>
+
         <!-- Conversation Stats Section -->
         <div id="section-convo-stats" class="trend-section" style="display: none;">
             <div class="mb-6 space-y-4">
@@ -449,6 +494,12 @@
         let uploaderRangeMinDate = null;
         let uploaderRangeMaxDate = null;
         let isLoadingUploaderTrends = false;
+        let peopleTalkedTrendChart = null;
+        let peopleTalkedTrendPayload = null;
+        let peopleTalkedPrecomputedTrends = null;
+        let peopleTalkedRangeMinDate = null;
+        let peopleTalkedRangeMaxDate = null;
+        let isLoadingPeopleTalkedTrends = false;
         let fullRangeMinDate = null;
         let fullRangeMaxDate = null;
         let progressiveModeEnabled = true;
@@ -508,6 +559,12 @@
                     setTimeout(() => loadUploaderTrends(), 0);
                 } else {
                     setTimeout(() => refreshUploaderChart(), 0);
+                }
+            } else if (tabName === 'people-talked') {
+                if (!peopleTalkedTrendPayload) {
+                    setTimeout(() => loadPeopleTalkedTrends(), 0);
+                } else {
+                    setTimeout(() => refreshPeopleTalkedChart(), 0);
                 }
             } else if (tabName === 'convo-stats') {
                 setTimeout(() => loadConvoStatsTrends(), 0);
@@ -1287,6 +1344,351 @@
                         <p class="text-gray-500 dark:text-gray-400 font-semibold mb-1">Messages Received</p>
                         <p class="text-2xl font-bold text-green-600 dark:text-green-400">${series.totalReceived}</p>
                         <p class="text-gray-500 dark:text-gray-400 text-xs mt-1">Avg per ${series.aggregation === 'week' ? 'week' : 'day'}: ${(series.totalReceived / series.totalBuckets).toFixed(1)}</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function loadPeopleTalkedTrends() {
+            if (isLoadingPeopleTalkedTrends) return;
+            isLoadingPeopleTalkedTrends = true;
+            const loading = document.getElementById('people-talked-loading-indicator');
+            if (loading) loading.style.display = 'block';
+
+            let attempt = 0;
+            while (true) {
+                attempt += 1;
+                try {
+                    const response = await fetch('/api/people_talked_trends?full=1', { cache: 'no-store' });
+                    const responseData = await response.json().catch(() => ({}));
+
+                    if (response.status === 202 || responseData.status === 'processing') {
+                        if (attempt === 1 || attempt % 4 === 0) {
+                            showToast('Preparing people/chats trend in the background… retrying', 'info', 1800);
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 1200));
+                        continue;
+                    }
+
+                    if (!response.ok) {
+                        const err = new Error(responseData.error || `Request failed (${response.status})`);
+                        if (responseData.offline) err.offline = true;
+                        throw err;
+                    }
+
+                    peopleTalkedTrendPayload = responseData.data || {
+                        uploader_username: null,
+                        active_people_daily_counts: {},
+                        active_chats_daily_counts: {}
+                    };
+                    peopleTalkedPrecomputedTrends = responseData.precomputed_trends || null;
+                    peopleTalkedRangeMinDate = responseData.range?.min_date || null;
+                    peopleTalkedRangeMaxDate = responseData.range?.max_date || null;
+                    initializePeopleTalkedControls();
+                    refreshPeopleTalkedChart();
+                    break;
+                } catch (error) {
+                    if (error.offline) {
+                        showToast('Offline — people/chats trend data is not cached.', 'error', 5000);
+                        break;
+                    }
+                    showToast(`Error loading people/chats trend: ${error.message}. Retrying…`, 'error', 2600);
+                    await new Promise(resolve => setTimeout(resolve, 1800));
+                }
+            }
+
+            if (loading) loading.style.display = 'none';
+            isLoadingPeopleTalkedTrends = false;
+        }
+
+        function initializePeopleTalkedControls() {
+            if (!peopleTalkedRangeMinDate || !peopleTalkedRangeMaxDate) return;
+
+            const startInput = document.getElementById('people-talked-start-date');
+            const endInput = document.getElementById('people-talked-end-date');
+
+            if (!startInput || !endInput) return;
+
+            startInput.min = peopleTalkedRangeMinDate;
+            startInput.max = peopleTalkedRangeMaxDate;
+            endInput.min = peopleTalkedRangeMinDate;
+            endInput.max = peopleTalkedRangeMaxDate;
+
+            if (!startInput.value) startInput.value = peopleTalkedRangeMinDate;
+            if (!endInput.value) endInput.value = peopleTalkedRangeMaxDate;
+        }
+
+        function resetPeopleTalkedChartRange() {
+            if (!peopleTalkedRangeMinDate || !peopleTalkedRangeMaxDate) return;
+            const startInput = document.getElementById('people-talked-start-date');
+            const endInput = document.getElementById('people-talked-end-date');
+            if (startInput) startInput.value = peopleTalkedRangeMinDate;
+            if (endInput) endInput.value = peopleTalkedRangeMaxDate;
+            refreshPeopleTalkedChart();
+        }
+
+        function peopleTalkedChartOptionsFromControls() {
+            const aggregation = document.getElementById('people-talked-aggregation')?.value || 'day';
+            const startValue = document.getElementById('people-talked-start-date')?.value || peopleTalkedRangeMinDate;
+            const endValue = document.getElementById('people-talked-end-date')?.value || peopleTalkedRangeMaxDate;
+            return { aggregation, startValue, endValue };
+        }
+
+        function buildPeopleTalkedSeries(options) {
+            const payload = peopleTalkedTrendPayload || {
+                uploader_username: null,
+                active_people_daily_counts: {},
+                active_chats_daily_counts: {}
+            };
+            const peopleDailyCounts = payload.active_people_daily_counts || {};
+            const chatsDailyCounts = payload.active_chats_daily_counts || {};
+
+            const rangeStart = options.startValue || '1970-01-01';
+            const rangeEnd = options.endValue || '2099-12-31';
+            const peopleBucketMap = {};
+            const chatsBucketMap = {};
+
+            Object.entries(peopleDailyCounts).forEach(([dateStr, count]) => {
+                if (dateStr < rangeStart || dateStr > rangeEnd) {
+                    return;
+                }
+
+                const date = parseLocalDateKey(dateStr);
+                const key = options.aggregation === 'week'
+                    ? formatLocalDateKey(startOfLocalWeek(date))
+                    : dateStr;
+
+                peopleBucketMap[key] = (peopleBucketMap[key] || 0) + Number(count || 0);
+            });
+
+            Object.entries(chatsDailyCounts).forEach(([dateStr, count]) => {
+                if (dateStr < rangeStart || dateStr > rangeEnd) {
+                    return;
+                }
+
+                const date = parseLocalDateKey(dateStr);
+                const key = options.aggregation === 'week'
+                    ? formatLocalDateKey(startOfLocalWeek(date))
+                    : dateStr;
+
+                chatsBucketMap[key] = (chatsBucketMap[key] || 0) + Number(count || 0);
+            });
+
+            const allKeys = new Set([...Object.keys(peopleBucketMap), ...Object.keys(chatsBucketMap)]);
+            const sortedKeys = Array.from(allKeys).sort();
+
+            if (sortedKeys.length === 0) {
+                return {
+                    aggregation: options.aggregation,
+                    labels: [],
+                    peopleCounts: [],
+                    chatsCounts: [],
+                    peopleTrend: [],
+                    chatsTrend: [],
+                    totalPeople: 0,
+                    totalChats: 0,
+                    totalBuckets: 0,
+                    peakPeople: 0,
+                    peakChats: 0
+                };
+            }
+
+            const labels = [];
+            const peopleCounts = [];
+            const chatsCounts = [];
+            sortedKeys.forEach((key) => {
+                const bucketDate = parseLocalDateKey(key);
+                if (options.aggregation === 'week') {
+                    const weekEnd = addDays(bucketDate, 6);
+                    labels.push(`${bucketDate.toLocaleDateString()} - ${weekEnd.toLocaleDateString()}`);
+                } else {
+                    labels.push(bucketDate.toLocaleDateString());
+                }
+                peopleCounts.push(Number(peopleBucketMap[key] || 0));
+                chatsCounts.push(Number(chatsBucketMap[key] || 0));
+            });
+
+            const trendWindow = options.aggregation === 'week' ? 4 : 7;
+            let peopleTrend = null;
+            let chatsTrend = null;
+
+            if (peopleTalkedPrecomputedTrends) {
+                const peopleSource = peopleTalkedPrecomputedTrends.people?.[options.aggregation === 'week' ? 'weekly' : 'daily'];
+                const chatsSource = peopleTalkedPrecomputedTrends.chats?.[options.aggregation === 'week' ? 'weekly' : 'daily'];
+
+                if (peopleSource) {
+                    const backendKeys = Array.isArray(peopleSource?.keys) ? peopleSource.keys : [];
+                    const backendTrendValues = Array.isArray(peopleSource?.trend) ? peopleSource.trend : [];
+                    const trendByKey = {};
+                    backendKeys.forEach((key, index) => {
+                        trendByKey[key] = Number(backendTrendValues[index] ?? 0);
+                    });
+                    const hasAllKeys = sortedKeys.every((key) => Object.prototype.hasOwnProperty.call(trendByKey, key));
+                    if (hasAllKeys) {
+                        peopleTrend = sortedKeys.map((key) => trendByKey[key]);
+                    }
+                }
+
+                if (chatsSource) {
+                    const backendKeys = Array.isArray(chatsSource?.keys) ? chatsSource.keys : [];
+                    const backendTrendValues = Array.isArray(chatsSource?.trend) ? chatsSource.trend : [];
+                    const trendByKey = {};
+                    backendKeys.forEach((key, index) => {
+                        trendByKey[key] = Number(backendTrendValues[index] ?? 0);
+                    });
+                    const hasAllKeys = sortedKeys.every((key) => Object.prototype.hasOwnProperty.call(trendByKey, key));
+                    if (hasAllKeys) {
+                        chatsTrend = sortedKeys.map((key) => trendByKey[key]);
+                    }
+                }
+            }
+
+            if (!peopleTrend) {
+                peopleTrend = movingAverage(peopleCounts, trendWindow);
+            }
+            if (!chatsTrend) {
+                chatsTrend = movingAverage(chatsCounts, trendWindow);
+            }
+
+            const totalPeople = peopleCounts.reduce((acc, value) => acc + value, 0);
+            const totalChats = chatsCounts.reduce((acc, value) => acc + value, 0);
+
+            return {
+                aggregation: options.aggregation,
+                labels,
+                peopleCounts,
+                chatsCounts,
+                peopleTrend,
+                chatsTrend,
+                totalPeople,
+                totalChats,
+                totalBuckets: sortedKeys.length,
+                peakPeople: Math.max(...peopleCounts),
+                peakChats: Math.max(...chatsCounts)
+            };
+        }
+
+        function refreshPeopleTalkedChart() {
+            const canvas = document.getElementById('people-talked-chart');
+            const summary = document.getElementById('people-talked-summary');
+            if (!canvas || !summary) return;
+
+            if (peopleTalkedTrendChart) {
+                peopleTalkedTrendChart.destroy();
+                peopleTalkedTrendChart = null;
+            }
+
+            const options = peopleTalkedChartOptionsFromControls();
+            const series = buildPeopleTalkedSeries(options);
+
+            if (series.labels.length === 0) {
+                summary.innerHTML = '<p class="text-sm text-gray-500 dark:text-gray-400">No people/chats activity found in the selected range.</p>';
+                return;
+            }
+
+            const isDark = document.documentElement.classList.contains('dark');
+            const gridColor = isDark ? 'rgba(148, 163, 184, 0.18)' : 'rgba(100, 116, 139, 0.2)';
+            const axisColor = isDark ? '#cbd5e1' : '#475569';
+
+            peopleTalkedTrendChart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: series.labels,
+                    datasets: [
+                        {
+                            label: 'Active People',
+                            data: series.peopleCounts,
+                            borderColor: isDark ? '#60a5fa' : '#2563eb',
+                            backgroundColor: 'transparent',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            fill: false,
+                            tension: 0.2
+                        },
+                        {
+                            label: 'Active Chats',
+                            data: series.chatsCounts,
+                            borderColor: isDark ? '#34d399' : '#059669',
+                            backgroundColor: 'transparent',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            fill: false,
+                            tension: 0.2
+                        },
+                        {
+                            label: options.aggregation === 'week' ? 'Active People 4-Week Avg' : 'Active People 7-Day Avg',
+                            data: series.peopleTrend,
+                            borderColor: isDark ? '#fbbf24' : '#d97706',
+                            borderWidth: 2,
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.25
+                        },
+                        {
+                            label: options.aggregation === 'week' ? 'Active Chats 4-Week Avg' : 'Active Chats 7-Day Avg',
+                            data: series.chatsTrend,
+                            borderColor: isDark ? '#f59e0b' : '#b45309',
+                            borderWidth: 2,
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.25
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: {
+                                color: axisColor
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: {
+                                color: axisColor,
+                                maxTicksLimit: 10
+                            },
+                            grid: {
+                                color: gridColor
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0,
+                                color: axisColor
+                            },
+                            grid: {
+                                color: gridColor
+                            }
+                        }
+                    }
+                }
+            });
+
+            summary.innerHTML = `
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                    <div class="rounded-lg bg-blue-50 dark:bg-blue-900/30 p-3 border border-blue-200 dark:border-blue-800">
+                        <p class="text-gray-500 dark:text-gray-400 font-semibold mb-1">Active People (sum by period)</p>
+                        <p class="text-2xl font-bold text-blue-600 dark:text-blue-400">${series.totalPeople}</p>
+                        <p class="text-gray-500 dark:text-gray-400 text-xs mt-1">Avg per ${series.aggregation === 'week' ? 'week' : 'day'}: ${(series.totalPeople / series.totalBuckets).toFixed(1)} · Peak: ${series.peakPeople}</p>
+                    </div>
+                    <div class="rounded-lg bg-green-50 dark:bg-green-900/30 p-3 border border-green-200 dark:border-green-800">
+                        <p class="text-gray-500 dark:text-gray-400 font-semibold mb-1">Active Chats (sum by period)</p>
+                        <p class="text-2xl font-bold text-green-600 dark:text-green-400">${series.totalChats}</p>
+                        <p class="text-gray-500 dark:text-gray-400 text-xs mt-1">Avg per ${series.aggregation === 'week' ? 'week' : 'day'}: ${(series.totalChats / series.totalBuckets).toFixed(1)} · Peak: ${series.peakChats}</p>
                     </div>
                 </div>
             `;

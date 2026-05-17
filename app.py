@@ -101,6 +101,11 @@ uploader_trends_jobs_lock = threading.Lock()
 uploader_trends_series_cache = {}
 uploader_trends_series_cache_lock = threading.Lock()
 
+people_talked_trends_jobs = {}
+people_talked_trends_jobs_lock = threading.Lock()
+people_talked_trends_series_cache = {}
+people_talked_trends_series_cache_lock = threading.Lock()
+
 
 def _build_group_chat_precomputed_trends(group_chats):
     """Build aggregate totals and moving-average trends for day and week buckets."""
@@ -151,6 +156,36 @@ def _build_uploader_precomputed_trends(sent_daily_counts, received_daily_counts)
     return {
         'sent': _series_to_payload(sent_series),
         'received': _series_to_payload(received_series)
+    }
+
+
+def _build_people_talked_precomputed_trends(active_people_daily_counts, active_chats_daily_counts):
+    """Build daily/weekly totals and moving-average trends for active people/chats."""
+    people_series, chats_series = build_uploader_trends_series(
+        active_people_daily_counts or {},
+        active_chats_daily_counts or {}
+    )
+
+    def _series_to_payload(series):
+        daily_keys, daily_totals, daily_trend, daily_window, weekly_keys, weekly_totals, weekly_trend, weekly_window = series
+        return {
+            'keys': daily_keys,
+            'daily': {
+                'totals': daily_totals,
+                'trend': daily_trend,
+                'window': daily_window
+            },
+            'weekly': {
+                'keys': weekly_keys,
+                'totals': weekly_totals,
+                'trend': weekly_trend,
+                'window': weekly_window
+            }
+        }
+
+    return {
+        'people': _series_to_payload(people_series),
+        'chats': _series_to_payload(chats_series)
     }
 
 
@@ -254,6 +289,87 @@ def _uploader_trends_worker(user_code):
 
     with uploader_trends_jobs_lock:
         uploader_trends_jobs.pop(user_code, None)
+
+
+def compute_people_talked_trends(user_code):
+    """Compute and cache daily active chats and distinct people talked to."""
+    cache_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_people_talked_trends.json')
+
+    if os.path.exists(cache_path):
+        return
+
+    uploader_username = load_uploader_name(user_code)
+    conversations = get_conversations(user_code)
+
+    active_people_by_day = {}
+    active_chats_by_day = {}
+
+    for conv in conversations:
+        conv_id = conv.get('id')
+        if not conv_id:
+            continue
+
+        messages = load_conversation_data(user_code, conv_id)
+        active_days_for_chat = set()
+
+        for message in messages:
+            ts_value = message.get('timestamp_ms')
+            try:
+                ts_ms = int(ts_value)
+            except (TypeError, ValueError):
+                continue
+
+            day_key = datetime.datetime.utcfromtimestamp(ts_ms / 1000).strftime('%Y-%m-%d')
+            active_days_for_chat.add(day_key)
+
+            sender_name = message.get('sender_name')
+            if not isinstance(sender_name, str) or not sender_name:
+                continue
+            if uploader_username and sender_name == uploader_username:
+                continue
+
+            if day_key not in active_people_by_day:
+                active_people_by_day[day_key] = set()
+            active_people_by_day[day_key].add(sender_name)
+
+        for day_key in active_days_for_chat:
+            if day_key not in active_chats_by_day:
+                active_chats_by_day[day_key] = set()
+            active_chats_by_day[day_key].add(conv_id)
+
+    active_people_daily_counts = {
+        day_key: len(people_set)
+        for day_key, people_set in active_people_by_day.items()
+    }
+    active_chats_daily_counts = {
+        day_key: len(chat_set)
+        for day_key, chat_set in active_chats_by_day.items()
+    }
+
+    with open(cache_path, 'w') as f:
+        json.dump({
+            'uploader_username': uploader_username,
+            'active_people_daily_counts': active_people_daily_counts,
+            'active_chats_daily_counts': active_chats_daily_counts
+        }, f)
+
+
+def _people_talked_trends_worker(user_code):
+    """Worker thread wrapper that computes people/chats activity trends."""
+    try:
+        compute_people_talked_trends(user_code)
+        print(f"[CACHE WRITE] Saved people talked trends cache for user {user_code}")
+    except Exception as e:
+        print(f"[PEOPLE_TRENDS_ERROR] Failed for user {user_code}: {e}")
+        traceback.print_exc()
+        with people_talked_trends_jobs_lock:
+            job = people_talked_trends_jobs.get(user_code)
+            if job:
+                job.error = str(e)
+        return
+
+    with people_talked_trends_jobs_lock:
+        people_talked_trends_jobs.pop(user_code, None)
 
 
 # ── Conversation Detection ────────────────────────────────────────────────────
@@ -1454,6 +1570,128 @@ def api_uploader_message_trends():
     return jsonify({
         'status': 'processing',
         'message': 'Started background computation for uploader message trends'
+    }), 202
+
+
+@app.route('/api/people_talked_trends')
+def api_people_talked_trends():
+    if 'user_code' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    user_code = session['user_code']
+    cache_path = os.path.join(app.config['UPLOAD_FOLDER'], user_code, 'cached_people_talked_trends.json')
+
+    if os.path.exists(cache_path):
+        print(f"[CACHE HIT] Loading people talked trends from cache for user {user_code}")
+        with open(cache_path, 'r') as f:
+            cached_payload = json.load(f)
+
+        active_people_daily_counts = cached_payload.get('active_people_daily_counts') or {}
+        active_chats_daily_counts = cached_payload.get('active_chats_daily_counts') or {}
+        all_dates = list(set(active_people_daily_counts.keys()) | set(active_chats_daily_counts.keys()))
+        month_keys = sorted({date_key[:7] for date_key in all_dates if isinstance(date_key, str) and len(date_key) >= 7})
+        min_date = min(all_dates) if all_dates else None
+        max_date = max(all_dates) if all_dates else None
+
+        full_requested = str(request.args.get('full', '')).lower() in ('1', 'true', 'yes')
+        months_requested_raw = request.args.get('months', '1')
+        try:
+            months_requested = max(1, int(months_requested_raw))
+        except ValueError:
+            months_requested = 1
+
+        months_loaded = len(month_keys) if full_requested else min(months_requested, len(month_keys))
+        allowed_months = set(month_keys[:months_loaded])
+
+        if full_requested or not month_keys:
+            filtered_people_counts = active_people_daily_counts
+            filtered_chats_counts = active_chats_daily_counts
+        else:
+            filtered_people_counts = {
+                date_key: count
+                for date_key, count in active_people_daily_counts.items()
+                if isinstance(date_key, str) and len(date_key) >= 7 and date_key[:7] in allowed_months
+            }
+            filtered_chats_counts = {
+                date_key: count
+                for date_key, count in active_chats_daily_counts.items()
+                if isinstance(date_key, str) and len(date_key) >= 7 and date_key[:7] in allowed_months
+            }
+
+        loaded_dates = list(set(filtered_people_counts.keys()) | set(filtered_chats_counts.keys()))
+        loaded_min_date = min(loaded_dates) if loaded_dates else None
+        loaded_max_date = max(loaded_dates) if loaded_dates else None
+
+        series_cache_key = (user_code, 'full' if full_requested else f'months:{months_loaded}')
+        cache_mtime = os.path.getmtime(cache_path)
+
+        precomputed_trends = None
+        with people_talked_trends_series_cache_lock:
+            cached_series = people_talked_trends_series_cache.get(series_cache_key)
+            if cached_series and cached_series.get('mtime') == cache_mtime:
+                precomputed_trends = cached_series.get('value')
+
+        if precomputed_trends is None:
+            precomputed_trends = _build_people_talked_precomputed_trends(
+                filtered_people_counts,
+                filtered_chats_counts
+            )
+            with people_talked_trends_series_cache_lock:
+                people_talked_trends_series_cache[series_cache_key] = {
+                    'mtime': cache_mtime,
+                    'value': precomputed_trends
+                }
+
+        return jsonify({
+            'data': {
+                'uploader_username': cached_payload.get('uploader_username'),
+                'active_people_daily_counts': filtered_people_counts,
+                'active_chats_daily_counts': filtered_chats_counts
+            },
+            'cached': True,
+            'cache_file': cache_path,
+            'partial': not full_requested,
+            'months_loaded': months_loaded,
+            'total_months': len(month_keys),
+            'month_keys': month_keys,
+            'precomputed_trends': precomputed_trends,
+            'range': {
+                'min_date': min_date,
+                'max_date': max_date
+            },
+            'loaded_range': {
+                'min_date': loaded_min_date,
+                'max_date': loaded_max_date
+            }
+        })
+
+    with people_talked_trends_jobs_lock:
+        existing_job = people_talked_trends_jobs.get(user_code)
+
+        if existing_job and existing_job.thread.is_alive():
+            elapsed = round(time.time() - existing_job.started_at, 2)
+            return jsonify({
+                'status': 'processing',
+                'message': 'People talked trends are still being computed',
+                'elapsed_seconds': elapsed
+            }), 202
+
+        if existing_job and existing_job.error:
+            last_error = existing_job.error
+            people_talked_trends_jobs.pop(user_code, None)
+            return jsonify({
+                'status': 'failed',
+                'error': f'Background computation failed: {last_error}'
+            }), 500
+
+        print(f"[CACHE MISS] Starting background people talked trends compute for user {user_code}")
+        worker = threading.Thread(target=_people_talked_trends_worker, args=(user_code,), daemon=True)
+        people_talked_trends_jobs[user_code] = GroupTrendsJob(thread=worker)
+        worker.start()
+
+    return jsonify({
+        'status': 'processing',
+        'message': 'Started background computation for people talked trends'
     }), 202
 
 

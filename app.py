@@ -139,8 +139,8 @@ def _build_uploader_precomputed_trends(sent_daily_counts, received_daily_counts)
     def _series_to_payload(series):
         daily_keys, daily_totals, daily_trend, daily_window, weekly_keys, weekly_totals, weekly_trend, weekly_window = series
         return {
-            'keys': daily_keys,
             'daily': {
+                'keys': daily_keys,
                 'totals': daily_totals,
                 'trend': daily_trend,
                 'window': daily_window

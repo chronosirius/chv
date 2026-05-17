@@ -398,7 +398,7 @@
                     </div>
                 </div>
                 <div class="w-full" id="people-talked-loading-indicator" style="display: none;">
-                    <div class="relative h-3 rounded-lg w-full overflow-hidden light:bg-blue-100 dark:bg-blue-900">
+                    <div class="relative h-3 rounded-lg w-full overflow-hidden bg-blue-100 dark:bg-blue-900">
                         <div class="progress-bar-value absolute h-full bg-blue-500"></div>
                     </div>
                 </div>
@@ -1164,7 +1164,7 @@
                 receivedCounts.push(Number(receivedBucketMap[key] || 0));
             });
 
-            const trendWindow = options.aggregation === 'week' ? 4 : 7;
+            const movingAverageWindow = options.aggregation === 'week' ? 4 : 7;
             let sentTrend = null;
             let receivedTrend = null;
 
@@ -1544,10 +1544,10 @@
             }
 
             if (!peopleTrend) {
-                peopleTrend = movingAverage(peopleCounts, trendWindow);
+                peopleTrend = movingAverage(peopleCounts, movingAverageWindow);
             }
             if (!chatsTrend) {
-                chatsTrend = movingAverage(chatsCounts, trendWindow);
+                chatsTrend = movingAverage(chatsCounts, movingAverageWindow);
             }
 
             const totalPeople = peopleCounts.reduce((acc, value) => acc + value, 0);

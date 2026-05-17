@@ -1034,6 +1034,15 @@
                         <div>
                             <p class="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">Average Response Time</p>
                             <p class="text-xl font-semibold text-gray-900 dark:text-white">${formatDuration(currentData.responses.avg)}</p>
+                            ${Object.keys(currentData.responses.by_sender || {}).length > 0 ? `
+                            <div class="mt-2 space-y-1">
+                                ${Object.entries(currentData.responses.by_sender).map(([sender, stats]) => `
+                                    <div class="flex justify-between text-sm">
+                                        <span class="text-gray-600 dark:text-gray-400">${sender}</span>
+                                        <span class="font-medium text-gray-900 dark:text-white">${formatDuration(stats.avg)}</span>
+                                    </div>
+                                `).join('')}
+                            </div>` : ''}
                         </div>
                         <hr class="border-gray-300 dark:border-gray-600">
                         <div>

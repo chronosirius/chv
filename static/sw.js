@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v7';
+const CACHE_VERSION = 'v8';
 const STATIC_CACHE = `chv-static-${CACHE_VERSION}`;
 const API_CACHE = `chv-api-${CACHE_VERSION}`;
 
@@ -78,8 +78,8 @@ async function backgroundPrefetch() {
     }
 
     const convCount = Array.isArray(conversations) ? conversations.length : 0;
-    // total = individual convos + group_chat_trends + uploader_trends + convo_stats
-    const total = convCount + 3;
+    // total = individual convos + group_chat_trends + uploader_trends + people_talked_trends + convo_stats
+    const total = convCount + 4;
 
     prefetchChannel.postMessage({ type: 'PREFETCH_START', total });
 
@@ -122,6 +122,7 @@ async function backgroundPrefetch() {
     // ── Step 3: trends + stats ─────────────────────────────────────────────
     await prefetchIfMissing('/api/group_chat_trends?full=1', 'Group chat trends');
     await prefetchIfMissing('/api/uploader_message_trends?full=1', 'Uploader trends');
+    await prefetchIfMissing('/api/people_talked_trends?full=1', 'People/chats trends');
     await prefetchIfMissing('/api/convo_stats', 'Conversation stats');
 
     prefetchChannel.postMessage({ type: 'PREFETCH_DONE', total });
@@ -350,7 +351,10 @@ self.addEventListener('fetch', (event) => {
                         if (cached) return cached;
                         return fetch(request)
                             .then((response) => {
-                                if (response.ok) cache.put(request, response.clone()).catch((err) => console.warn('[SW] API cache put failed:', err));
+                                // Never cache 202 (Accepted) responses – they are volatile and subject to change
+                                if (response.ok && response.status !== 202) {
+                                    cache.put(request, response.clone()).catch((err) => console.warn('[SW] API cache put failed:', err));
+                                }
                                 return response;
                             })
                             .catch(async () => {

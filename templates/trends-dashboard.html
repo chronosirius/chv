@@ -333,6 +333,7 @@
                 <div class="relative h-96 mb-6" id="group-chats-chart-container" style="position: relative;">
                     <canvas id="group-chat-chart"></canvas>
                 </div>
+                <div id="group-chats-legend" class="chart-legend-container" style="display: none;"></div>
                 <div id="group-chat-summary" class="mt-4"></div>
             </div>
         </div>
@@ -1919,6 +1920,7 @@
         function refreshGroupChatsChart() {
             const canvas = document.getElementById('group-chat-chart');
             const summary = document.getElementById('group-chat-summary');
+            const legendContainer = document.getElementById('group-chats-legend');
             
             if (!canvas || !summary) {
                 // Create the content structure if it doesn't exist
@@ -1981,11 +1983,19 @@
             }
 
             if (series.labels.length === 0) {
+                if (legendContainer) {
+                    legendContainer.innerHTML = '';
+                    legendContainer.style.display = 'none';
+                }
                 summary.innerHTML = '<p class="text-sm text-gray-500 dark:text-gray-400">No messages found in the selected range.</p>';
                 return;
             }
 
             if (typeof Chart === 'undefined') {
+                if (legendContainer) {
+                    legendContainer.innerHTML = '';
+                    legendContainer.style.display = 'none';
+                }
                 summary.innerHTML = '<p class="text-sm text-red-600 dark:text-red-400">Chart library failed to load.</p>';
                 return;
             }
@@ -2141,18 +2151,19 @@
             groupChatTrendChart.update();
 
             function getOrCreateLegendContainer() {
-                let legendContainer = document.querySelector('.chart-legend-container');
+                const legendContainer = document.getElementById('group-chats-legend');
                 if (!legendContainer) {
-                    legendContainer = document.createElement('div');
-                    legendContainer.className = 'chart-legend-container';
-                    const chartContainer = document.getElementById('group-chats-chart-container');
-                    chartContainer.parentNode.insertBefore(legendContainer, chartContainer.nextSibling);
+                    return null;
                 }
+                legendContainer.style.display = '';
                 return legendContainer;
             }
 
             function renderCheckboxLegend() {
                 const legendContainer = getOrCreateLegendContainer();
+                if (!legendContainer) {
+                    return;
+                }
                 const groupEntries = rankedGroupChatEntriesForDataPoint(frozenLegendDataIndex);
                 const trendEntry = series.datasets
                     .map((dataset, datasetIndex) => ({ dataset, datasetIndex }))
@@ -2320,6 +2331,9 @@
 
                 // Update or create legend container
                 const legendContainer = getOrCreateLegendContainer();
+                if (!legendContainer) {
+                    return;
+                }
                 legendContainer.innerHTML = legendHtml + trendLegend;
             }
 

@@ -351,7 +351,10 @@ self.addEventListener('fetch', (event) => {
                         if (cached) return cached;
                         return fetch(request)
                             .then((response) => {
-                                if (response.ok) cache.put(request, response.clone()).catch((err) => console.warn('[SW] API cache put failed:', err));
+                                // Never cache 202 (Accepted) responses – they are volatile and subject to change
+                                if (response.ok && response.status !== 202) {
+                                    cache.put(request, response.clone()).catch((err) => console.warn('[SW] API cache put failed:', err));
+                                }
                                 return response;
                             })
                             .catch(async () => {
